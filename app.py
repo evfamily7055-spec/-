@@ -13,10 +13,9 @@ from itertools import combinations
 import japanize_matplotlib # Matplotlibの日本語化
 import numpy as np # --- 統計計算のために追加 ---
 from scipy.stats import chi2_contingency # --- カイ二乗検定のために追加 ---
-# --- ▼ 修正点: streamlit_extras.row の import を削除 ▼ ---
-# from streamlit_extras.row import row 
+# --- ▼ 修正点: prince の import を削除 ▼ ---
+# import prince 
 # --- ▲ 修正完了 ▲ ---
-import prince # --- 対応分析のために追加 ---
 import io # --- 画像ダウンロード機能のために追加 ---
 
 # --- 1. アプリの基本設定 ---
@@ -29,12 +28,14 @@ st.write("Excelをアップロードし、テキスト列と分析軸（属性�
 def get_tokenizer():
     return Tokenizer()
 
-# ストップワード（一般的すぎる単語）
+# --- ▼ 修正点: ストップワードを追加 ▼ ---
 STOPWORDS = set([
     'の', 'に', 'は', 'を', 'た', 'です', 'ます', 'が', 'で', 'も', 'て', 'と', 'し', 'れ', 'さ', 'ある', 'いる', 'する',
     'ない', 'こと', 'もの', 'これ', 'それ', 'あれ', 'よう', 'ため', '人', '中', '等', '思う', 'いう', 'なる', '日', '時',
-    'くださる', 'いただく', 'しれる', 'くる', 'おる', 'れる', 'られる', 'せる', 'させる', 'できる', 'なる', 'やる', 'いく'
+    'くださる', 'いただく', 'しれる', 'くる', 'おる', 'れる', 'られる', 'せる', 'させる', 'できる', 'なる', 'やる', 'いく',
+    '行う', '言う', '申し上げる', 'まいる', '見る', 'ここ', 'そこ', 'あそこ', 'こちら', 'そちら', 'あちら', 'この', 'その', 'あの'
 ])
+# --- ▲ 修正完了 ▲ ---
 
 # テキストを単語リストに分割する関数
 @st.cache_data # テキストとTokenizerに変化がなければキャッシュ
@@ -46,16 +47,20 @@ def extract_words(text, _tokenizer): # _tokenizer引数はキャッシュのキ�
     words = []
     for token in tokens:
         
+        # --- ▼ 修正点: 数字のみのトークンを除外するロジックを強化 ▼ ---
+        # 表面形が数字のみかチェック
         if token.surface.isdigit():
             continue
+        # 基本形が数字のみかチェック
+        if token.base_form.isdigit():
+            continue
+        # --- ▲ 修正完了 ▲ ---
         
         part_of_speech = token.part_of_speech.split(',')[0]
         # 名詞、動詞、形容詞のみを抽出
         if part_of_speech in ['名詞', '動詞', '形容詞']:
             
-            if token.base_form.isdigit():
-                continue
-
+            # ストップワードでなく、1文字以上なら追加
             if token.base_form not in STOPWORDS and len(token.base_form) > 1:
                 words.append(token.base_form)
     return words
@@ -130,6 +135,7 @@ def call_gemini_api(text_data, has_attribute, prompt_type='simple'):
             if response.status_code == 200:
                 break
             elif response.status_code == 429 or response.status_code >= 500:
+                st.warning(f"AI APIがビジーです。リトライします... ({i+1}/5)", icon="⏳")
                 time.sleep(delay / 1000)
                 delay *= 2
             else:
@@ -139,8 +145,24 @@ def call_gemini_api(text_data, has_attribute, prompt_type='simple'):
              return f"AI分析に失敗しました。リトライ後もエラーが解消しませんでした。 (Status: {response.status_code})"
 
         result = response.json()
-        text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
-        return text if text else "AIからの応答が空でした。"
+        
+        # --- ▼ 修正点: AIからの応答がない場合のメッセージを改善 ▼ ---
+        candidates = result.get('candidates')
+        if not candidates:
+            st.error("AIからの応答がありませんでした (candidates is missing)。APIの制限に達したか、設定に問題がある可能性があります。", icon="🚨")
+            return "AIからの応答がありませんでした。"
+            
+        content = candidates[0].get('content')
+        if not content or not content.get('parts'):
+            st.error("AIからの応答形式が不正です (content or parts is missing)。", icon="🚨")
+            return "AIからの応答形式が不正です。"
+            
+        text = content['parts'][0].get('text', '')
+        if not text:
+             st.warning("AIからの応答が空でした。プロンプトやデータ内容を見直してください。", icon="⚠️")
+             return "AIからの応答が空でした。"
+        return text
+        # --- ▲ 修正完了 ▲ ---
 
     except Exception as e:
         if "403" in str(e):
@@ -249,64 +271,9 @@ def calculate_characteristic_words(_df, attribute_col, text_col): # _df を受�
         
     return results
 
-# --- 6. 対応分析 関数 ---
-@st.cache_data
-def run_correspondence_analysis(_df, attribute_col): # _df を受け取る
-    try:
-        # 最も頻繁に出現する単語 Top 30 を選定
-        all_words_list = [word for sublist in _df['words'] for word in sublist]
-        top_words = [word for word, freq in Counter(all_words_list).most_common(30)]
-        
-        # 属性のユニークな値を取得
-        unique_attrs = _df[attribute_col].dropna().unique()
-        
-        if len(unique_attrs) < 2:
-            return None, "対応分析エラー: 比較対象の属性が2つ未満です。"
-        if not top_words:
-            return None, "対応分析エラー: 分析対象の単語が見つかりません。"
-
-        # 「単語 × 属性」のクロス集計表を作成
-        cross_tab = pd.DataFrame(index=top_words, columns=unique_attrs)
-        for word in top_words:
-            for attr in unique_attrs:
-                # その属性を持ち、かつその単語を含む文書の数
-                count = sum(1 for i, row in _df[_df[attribute_col] == attr].iterrows() if word in row['words'])
-                cross_tab.loc[word, attr] = count
-        
-        # NaNを0で埋める
-        cross_tab = cross_tab.fillna(0).astype(int)
-        
-        # 合計が0の行・列があるとエラーになるため削除
-        cross_tab = cross_tab.loc[cross_tab.sum(axis=1) > 0]
-        cross_tab = cross_tab.loc[:, cross_tab.sum(axis=0) > 0]
-        
-        if cross_tab.empty:
-            return None, "対応分析エラー: 有効なクロス集計表を作成できませんでした。"
-
-        # 対応分析を実行
-        ca = prince.CA(
-            n_components=2,
-            n_iter=3,
-            copy=True,
-            check_input=True,
-            random_state=42
-        )
-        ca = ca.fit(cross_tab)
-
-        # プロットを作成
-        fig = ca.plot(
-            cross_tab,
-            x_component=0,
-            y_component=1,
-            show_row_labels=True,
-            show_col_labels=True,
-            figsize=(12, 12)
-        )
-        
-        return fig, None
-
-    except Exception as e:
-        return None, f"対応分析エラー: {e}"
+# --- ▼ 修正点: 対応分析 関数 を削除 ▼ ---
+# def run_correspondence_analysis(...):
+# --- ▲ 修正完了 ▲ ---
 
 # --- 7. WordCloud生成関数 (キャッシュ) ---
 @st.cache_data
@@ -322,8 +289,10 @@ def generate_wordcloud(_words_list, font_path):
             ax.axis('off')
             return fig_wc, "日本語フォントが見つかりませんでした。"
         else:
+            # --- ▼ 修正点: max_words を 100 に設定 ▼ ---
             wc = WordCloud(width=800, height=400, background_color='white',
-                           font_path=font_path).generate_from_frequencies(word_freq)
+                           font_path=font_path, max_words=100).generate_from_frequencies(word_freq)
+            # --- ▲ 修正完了 ▲ ---
             fig_wc, ax = plt.subplots(figsize=(12, 6))
             ax.imshow(wc, interpolation='bilinear')
             ax.axis('off')
@@ -336,7 +305,11 @@ def generate_wordcloud(_words_list, font_path):
 def generate_network(_words_df, font_path):
     co_occur_counter = Counter()
     for words in _words_df: # df['words'] を受け取る
-        unique_words = sorted(list(set(words)))
+        # --- ▼ 修正点: 数字を除外 (extract_wordsで行うのでここでは不要かも) ▼ ---
+        # words_filtered = [w for w in words if not w.isdigit()] # 一応残す
+        # unique_words = sorted(list(set(words_filtered)))
+        unique_words = sorted(list(set(words))) # extract_wordsを信じる
+        # --- ▲ 修正完了 ▲ ---
         for w1, w2 in combinations(unique_words, 2):
             co_occur_counter[(w1, w2)] += 1
     
@@ -437,8 +410,10 @@ if uploaded_file:
                         st.session_state.pop('fig_net', None)
                         st.session_state.pop('net_error', None)
                         st.session_state.pop('chi2_results', None)
-                        st.session_state.pop('fig_ca', None)
-                        st.session_state.pop('ca_error', None)
+                        # --- ▼ 修正点: 対応分析関連のキャッシュクリアを削除 ▼ ---
+                        # st.session_state.pop('fig_ca', None)
+                        # st.session_state.pop('ca_error', None)
+                        # --- ▲ 修正完了 ▲ ---
                         st.session_state.pop('overall_freq_df', None)
                         st.session_state.pop('attribute_freq_dfs', None)
 
@@ -464,8 +439,10 @@ if uploaded_file:
             if font_path is None:
                  st.warning("日本語フォント 'IPAexGothic' が見つかりませんでした。グラフの日本語が文字化けする可能性があります。", icon="⚠️")
 
-            tab_names = ["🤖 AI サマリー (簡易)", "☁️ WordCloud", "📊 単語頻度ランキング", "🕸️ 共起ネットワーク", "🔍 KWIC (文脈検索)", "📈 属性別 特徴語", "🗺️ 対応分析", "📝 AI 学術論文"]
-            tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(tab_names)
+            # --- ▼ 修正点: タブ名と数を変更 (対応分析を削除) ▼ ---
+            tab_names = ["🤖 AI サマリー (簡易)", "☁️ WordCloud", "📊 単語頻度ランキング", "🕸️ 共起ネットワーク", "🔍 KWIC (文脈検索)", "📈 属性別 特徴語", "📝 AI 学術論文"]
+            tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(tab_names) # タブ変数を7つに
+            # --- ▲ 修正完了 ▲ ---
             
             # --- Tab 1: AI サマリー (簡易) ---
             with tab1:
@@ -511,12 +488,12 @@ if uploaded_file:
                         #### 1. 分析プロセス
                         1.  **形態素解析**: アップロードされたデータの指定テキスト列に対し、`Janome` ライブラリを用いて形態素解析を実行しました。
                         2.  **単語抽出**: 抽出する品詞を「名詞」「動詞」「形容詞」に限定しました。
-                        3.  **ノイズ除去**: 一般的な助詞・助動詞（例: 「の」「です」）および、ユーザー指定の単語（例: 「くる」「いただく」）、数字、1文字の単語をストップワードとして分析から除外しました。
+                        3.  **ノイズ除去**: 一般的な助詞・助動詞（例: 「の」「です」）および、ユーザー指定の単語（例: 「くる」「いただく」「行う」「見る」等）、数字、1文字の単語をストップワードとして分析から除外しました。
                         4.  **頻度集計**: 出現したすべての単語（基本形）の頻度をカウントしました。
-                        5.  **可視化**: 上記の頻度データに基づき、`WordCloud` ライブラリを用いてワードクラウド（出現頻度が高い単語ほど大きく表示される図）を生成しました。
+                        5.  **可視化**: 上記の頻度データに基づき、`WordCloud` ライブラリを用いてワードクラウド（上位100語）を生成しました。
                         
                         #### 2. 論文記述例
-                        > ...本研究では、[テキスト列名] の全体的な傾向を把握するため、形態素解析（ライブラリ: Janome）によりテキストを単語に分かち書きした。分析対象は名詞、動詞、形容詞の基本形に限定し、一般的すぎる助詞・助動詞や数字、および[ユーザー指定の単語]等をストップワードとして除外した。その上で、全単語の出現頻度を可視化するため、ワードクラウドを生成した（図1参照）。
+                        > ...本研究では、[テキスト列名] の全体的な傾向を把握するため、形態素解析（ライブラリ: Janome）によりテキストを単語に分かち書きした。分析対象は名詞、動詞、形容詞の基本形に限定し、一般的すぎる助詞・助動詞や数字、および[ユーザー指定の単語]等をストップワードとして除外した。その上で、出現頻度上位100単語を対象にワードクラウドを生成した（図1参照）。
                         >
                         > 図1の結果から、[単語A]や[単語B]といった単語が特に大きく表示されており、[データ全体]においてこれらのトピックが頻繁に言及されていることが示唆された。
                     """)
@@ -558,8 +535,10 @@ if uploaded_file:
                                 ax.axis('off')
                             else:
                                 try:
+                                    # --- ▼ 修正点: max_words を 100 に設定 ▼ ---
                                     wc = WordCloud(width=600, height=300, background_color='white',
-                                                   font_path=font_path).generate_from_frequencies(Counter(subset_words_list))
+                                                   font_path=font_path, max_words=100).generate_from_frequencies(Counter(subset_words_list))
+                                    # --- ▲ 修正完了 ▲ ---
                                     ax.imshow(wc, interpolation='bilinear')
                                     ax.axis('off')
                                 except Exception as e:
@@ -628,15 +607,14 @@ if uploaded_file:
                         
                         st.info(f"「**{selected_attr_for_freq}**」の値ごとに単語頻度ランキング (Top 50) を表示します。")
                         
-                        # 属性値ごとに列で表示
-                        cols = st.columns(len(attribute_freq_dfs))
-                        for i, (val, freq_df) in enumerate(attribute_freq_dfs.items()):
-                             with cols[i % len(cols)]: # 列数に合わせて折り返す
-                                st.markdown(f"#### {selected_attr_for_freq} : **{val}**")
+                        # --- ▼ 修正点: マトリクス表示からExpander表示に変更 ▼ ---
+                        for val, freq_df in attribute_freq_dfs.items():
+                             with st.expander(f"属性: **{val}** のランキング"):
                                 if freq_df.empty:
                                     st.info("単語なし")
                                 else:
-                                    st.dataframe(freq_df, height=300) # 高さを固定してスクロール可能に
+                                    st.dataframe(freq_df, use_container_width=True) # コンテナ幅いっぱいに表示
+                        # --- ▲ 修正完了 ▲ ---
             
             # --- Tab 4: 共起ネットワーク ---
             with tab4: # 以前のtab3がtab4に
@@ -712,10 +690,10 @@ if uploaded_file:
                     if "error" in chi2_results:
                         st.error(chi2_results["error"])
                     else:
-                        if not chi2_results:
+                        if not chi2_results or all(not words for words in chi2_results.values()): # 全カテゴリで結果がない場合も考慮
                             st.info(f"属性「{attr_col_for_chi2}」には、統計的に有意な特徴語は見つかりませんでした。")
                         else:
-                            # --- ▼ 修正点: streamlit_extras.row を st.columns に変更 ▼ ---
+                            # st.columns を使用
                             cols = st.columns(len(chi2_results))
                             for i, (attr_value, words) in enumerate(chi2_results.items()):
                                 with cols[i % len(cols)]: # インデックスが列数を超えたら折り返す
@@ -725,7 +703,6 @@ if uploaded_file:
                                             st.write(f"- {word} (p={p_value:.3f})")
                                     else:
                                         st.info("特徴語なし")
-                            # --- ▲ 修正完了 ▲ ---
                 
                 with st.expander("分析プロセスと論文記述例"):
                     st.markdown("""
@@ -745,49 +722,11 @@ if uploaded_file:
                         > 表2の結果より、「A群」では[単語X, Y]が、「B群」では[単語Z]が特徴的に出現しており、...
                     """)
             
-            # --- Tab 7: 対応分析 ---
-            with tab7: # 以前のtab6がtab7に
-                st.subheader("対応分析（コレスポンデンス分析）")
-                if not attribute_columns:
-                    st.warning("この分析を行うには、サイドバーで「分析軸」を1つ以上選択してください。")
-                else:
-                    attr_col_for_ca = attribute_columns[0]
-                    st.info(f"属性 「**{attr_col_for_ca}**」 と、頻出単語 (Top 30) との関係性をプロットします。")
-                    
-                    if 'fig_ca' not in st.session_state:
-                        with st.spinner("対応分析を計算中..."):
-                            fig_ca, ca_error = run_correspondence_analysis(df_analyzed, attr_col_for_ca)
-                            st.session_state.fig_ca = fig_ca
-                            st.session_state.ca_error = ca_error
-
-                    if st.session_state.ca_error:
-                        st.error(st.session_state.ca_error)
-                    elif st.session_state.fig_ca:
-                        st.pyplot(st.session_state.fig_ca)
-                        st.download_button(
-                            label="この画像をダウンロード (PNG)",
-                            data=fig_to_bytes(st.session_state.fig_ca),
-                            file_name="correspondence_analysis.png",
-                            mime="image/png"
-                        )
-                    else:
-                        st.warning("対応分析のプロットを生成できませんでした。")
-
-                with st.expander("分析プロセスと論文記述例"):
-                    st.markdown("""
-                        #### 1. 分析プロセス
-                        1.  **クロス集計**: 選択された属性（例: 「年代」）と、出現頻度上位30単語について、単語の出現ドキュメント数を集計したクロス集計表を作成しました。
-                        2.  **分析実行**: この集計表に対し、`prince` ライブラリを用いて対応分析（CA）を実行しました。
-                        3.  **可視化**: 分析結果（第1軸・第2軸）に基づき、属性と単語を2次元空間にプロットしました。この空間では、位置が近いもの同士が強い関連性を持つことを示します。
-                        
-                        #### 2. 論文記述例
-                        > ...属性[属性名]と単語群の全体的な関連構造を把握するため、対応分析を実施した。属性[属性名]の各カテゴリと、出現頻度上位30単語（名詞、動詞、形容詞）のクロス集計表に基づき分析を行った（ライブラリ: prince）。
-                        >
-                        > 結果を図3に示す。第1軸は「...」、第2軸は「...」に関する軸と解釈できる。図3から、属性「A群」は[単語X, Y]と近接して配置される一方、属性「B群」は[単語Z]と近接しており、...
-                    """)
-
-            # --- Tab 8: AI 学術論文 ---
-            with tab8: # 以前のtab7がtab8に
+            # --- ▼ 修正点: Tab 7 (旧対応分析) を削除し、Tab 8 を Tab 7 に変更 ▼ ---
+            # with tab7: # 旧対応分析タブ削除
+            
+            with tab7: # 旧 Tab 8 (AI 学術論文) を Tab 7 に
+            # --- ▲ 修正完了 ▲ ---
                 st.subheader("AIによる学術論文風サマリー")
                 if 'ai_result_academic' not in st.session_state:
                     with st.spinner("AIによる学術論文風の要約を生成中..."):
