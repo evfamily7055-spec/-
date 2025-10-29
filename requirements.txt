@@ -6,3 +6,8 @@ networkx
 matplotlib
 japanize-matplotlib
 requests
+setuptools
+openpyxl
+streamlit-extras
+scipy
+prince
