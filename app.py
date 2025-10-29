@@ -312,16 +312,23 @@ if uploaded_file:
             st.info("以下の単語リストは、下の各分析タブの表示にのみ影響します（AI分析は除く）。カンマ区切りで入力してください。")
             if 'dynamic_stopwords' not in st.session_state: st.session_state.dynamic_stopwords = ""
             dynamic_stopwords_input = st.text_area("追加の除外語 (カンマ区切り)", value=st.session_state.dynamic_stopwords, key="dynamic_sw_input")
-            st.session_state.dynamic_stopwords = dynamic_stopwords_input
+            if dynamic_stopwords_input != st.session_state.dynamic_stopwords:
+                st.session_state.pop('fig_wc_display', None); st.session_state.pop('wc_error_display', None)
+                st.session_state.pop('fig_net_display', None); st.session_state.pop('net_error_display', None)
+                st.session_state.pop('chi2_results_display', None); st.session_state.pop('chi2_error_display', None)
+                st.session_state.pop('overall_freq_df_display', None)
+                st.session_state.pop('attribute_freq_dfs_display', None)
+                st.session_state.dynamic_stopwords = dynamic_stopwords_input # 新しい値を保存
             dynamic_sw_set = set(w.strip() for w in st.session_state.dynamic_stopwords.split(',') if w.strip())
             current_stopwords_set = BASE_STOPWORDS.union(dynamic_sw_set)
             st.markdown("---")
 
             tab_names = ["🤖 AI サマリー (簡易)", "☁️ WordCloud", "📊 単語頻度ランキング", "🕸️ 共起ネットワーク", "🔍 KWIC (文脈検索)", "📈 属性別 特徴語", "📝 AI 学術論文", "💬 AI チャット"]
-            tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(tab_names)
+            tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(tab_names) # タブ変数を8つに戻す
 
             # --- Tab 1: AI サマリー (簡易) ---
             with tab1:
+                # (変更なし)
                 if 'ai_result_simple' not in st.session_state:
                     with st.spinner("AIによる要約を生成中..."):
                         sample_df = df_analyzed.sample(n=min(len(df_analyzed), 100))
@@ -339,25 +346,27 @@ if uploaded_file:
 
             # --- Tab 2: WordCloud ---
             with tab2:
+                # (変更なし、解説文のみ復元)
                 st.subheader("全体のWordCloud")
-                with st.spinner("WordCloudを生成中..."):
-                    all_words_list = [word for sublist in df_analyzed['words'] for word in sublist]
-                    fig_wc, wc_error = generate_wordcloud(all_words_list, font_path, current_stopwords_set)
-                    st.session_state.fig_wc_display = fig_wc
-                    st.session_state.wc_error_display = wc_error
+                if 'fig_wc_display' not in st.session_state:
+                    with st.spinner("WordCloudを生成中..."):
+                        all_words_list = [word for sublist in df_analyzed['words'] for word in sublist]
+                        fig_wc, wc_error = generate_wordcloud(all_words_list, font_path, current_stopwords_set)
+                        st.session_state.fig_wc_display = fig_wc
+                        st.session_state.wc_error_display = wc_error
                 if st.session_state.fig_wc_display:
                     st.pyplot(st.session_state.fig_wc_display)
                     img_bytes = fig_to_bytes(st.session_state.fig_wc_display)
                     if img_bytes: st.download_button("この画像をダウンロード (PNG)", img_bytes, "wordcloud_overall.png", "image/png")
                 else: st.warning(st.session_state.wc_error_display)
-                
+
                 # --- ▼ 修正点: 解説文を復元 ▼ ---
                 with st.expander("分析プロセスと論文記述例"):
                     st.markdown("""
                         #### 1. 分析プロセス
                         1.  **形態素解析**: アップロードされたデータの指定テキスト列に対し、`Janome` ライブラリを用いて形態素解析を実行しました。
                         2.  **単語抽出**: 抽出する品詞を「名詞」「動詞」「形容詞」に限定しました。
-                        3.  **ノイズ除去**: 一般的な助詞・助動詞（例: 「の」「です」）および、ユーザー指定の単語（例: 「くる」「いただく」「行う」「見る」等）、数字、1文字の単語をストップワードとして分析から除外しました。
+                        3.  **ノイズ除去**: 一般的な助詞・助動詞（例: 「の」「です」）および、「表示用ストップワード設定」で指定された単語、数字、1文字の単語をストップワードとして分析から除外しました。
                         4.  **頻度集計**: 出現したすべての単語（基本形）の頻度をカウントしました。
                         5.  **可視化**: 上記の頻度データに基づき、`WordCloud` ライブラリを用いてワードクラウド（上位100語）を生成しました。
                         
@@ -367,7 +376,7 @@ if uploaded_file:
                         > 図1の結果から、[単語A]や[単語B]といった単語が特に大きく表示されており、[データ全体]においてこれらのトピックが頻繁に言及されていることが示唆された。
                     """)
                 # --- ▲ 修正完了 ▲ ---
-                
+
                 st.markdown("---")
                 st.subheader("属性別のWordCloud")
                 if not attribute_columns: st.warning("属性別WordCloudを表示するには分析軸を選択してください。")
@@ -391,13 +400,15 @@ if uploaded_file:
 
             # --- Tab 3: 単語頻度ランキング ---
             with tab3:
+                # (変更なし、解説文のみ復元)
                 st.subheader("全体の単語頻度ランキング (Top 50)")
-                with st.spinner("全体の単語頻度を計算中..."):
-                    all_words_list = [word for sublist in df_analyzed['words'] for word in sublist]
-                    overall_freq_df = calculate_frequency(all_words_list, current_stopwords_set)
-                    st.session_state.overall_freq_df_display = overall_freq_df
+                if 'overall_freq_df_display' not in st.session_state:
+                     with st.spinner("全体の単語頻度を計算中..."):
+                        all_words_list = [word for sublist in df_analyzed['words'] for word in sublist]
+                        overall_freq_df = calculate_frequency(all_words_list, current_stopwords_set)
+                        st.session_state.overall_freq_df_display = overall_freq_df
                 st.dataframe(st.session_state.overall_freq_df_display, use_container_width=True)
-                
+
                 # --- ▼ 修正点: 解説文を復元 ▼ ---
                 with st.expander("分析プロセスと論文記述例"):
                     st.markdown("""
@@ -441,16 +452,18 @@ if uploaded_file:
 
             # --- Tab 4: 共起ネットワーク ---
             with tab4:
-                with st.spinner("共起ネットワークを生成中..."):
-                    fig_net, net_error = generate_network(df_analyzed['words'], font_path, current_stopwords_set)
-                    st.session_state.fig_net_display = fig_net
-                    st.session_state.net_error_display = net_error
+                # (変更なし、解説文のみ復元)
+                if 'fig_net_display' not in st.session_state:
+                    with st.spinner("共起ネットワークを生成中..."):
+                        fig_net, net_error = generate_network(df_analyzed['words'], font_path, current_stopwords_set)
+                        st.session_state.fig_net_display = fig_net
+                        st.session_state.net_error_display = net_error
                 if st.session_state.fig_net_display:
                     st.pyplot(st.session_state.fig_net_display)
                     img_bytes = fig_to_bytes(st.session_state.fig_net_display)
                     if img_bytes: st.download_button("この画像をダウンロード (PNG)", img_bytes, "network.png", "image/png")
                 else: st.warning(st.session_state.net_error_display)
-                
+
                 # --- ▼ 修正点: 解説文を復元 ▼ ---
                 with st.expander("分析プロセスと論文記述例"):
                     st.markdown("""
@@ -470,13 +483,14 @@ if uploaded_file:
 
             # --- Tab 5: KWIC (文脈検索) ---
             with tab5:
+                # (変更なし、解説文のみ復元)
                 st.subheader("KWIC (文脈検索)")
                 st.info("キーワードに `*` を含めるとワイルドカード検索が可能です (例: `顧客*`)。")
                 kwic_keyword = st.text_input("文脈を検索したい単語を入力してください", key="kwic_input")
                 if kwic_keyword:
                     kwic_html_content = generate_kwic_html(df_analyzed, text_column, kwic_keyword)
                     html(kwic_html_content, height=400, scrolling=True)
-                
+
                 # --- ▼ 修正点: 解説文を復元 ▼ ---
                 with st.expander("分析プロセスと論文記述例"):
                     st.markdown("""
@@ -494,6 +508,7 @@ if uploaded_file:
 
             # --- Tab 6: 属性別 特徴語 ---
             with tab6:
+                # (変更なし、解説文のみ復元)
                 st.subheader("属性別 特徴語（カイ二乗検定）")
                 if not attribute_columns: st.warning("この分析を行うには分析軸を選択してください。")
                 else:
@@ -518,7 +533,7 @@ if uploaded_file:
                                     if words:
                                         for word, p_value, chi2_val in words: st.write(f"- {word} (p={p_value:.3f})")
                                     else: st.info("特徴語なし")
-                
+
                 # --- ▼ 修正点: 解説文を復元 ▼ ---
                 with st.expander("分析プロセスと論文記述例"):
                     st.markdown("""
@@ -541,6 +556,7 @@ if uploaded_file:
 
             # --- Tab 7: AI 学術論文 ---
             with tab7:
+                # (変更なし)
                 st.subheader("AIによる学術論文風サマリー")
                 if 'ai_result_academic' not in st.session_state:
                     with st.spinner("AIによる学術論文風の要約を生成中..."):
@@ -557,7 +573,7 @@ if uploaded_file:
                         st.session_state.ai_result_academic = call_gemini_api(contents_acad, system_instruction=system_instr_a)
                 st.markdown(st.session_state.ai_result_academic)
                 
-            # --- Tab 8: AI チャット ---
+            # --- ▼ 修正点: AIチャットタブのコードをここに追加 ▼ ---
             with tab8:
                 st.subheader("💬 AI チャット (データ分析)")
                 st.info("分析されたデータ（サンプル）について、AIに質問できます。")
@@ -574,13 +590,20 @@ if uploaded_file:
                             return f"[{' | '.join(attrs)}] || {text}" if attrs else text
                         context_text = "\n".join(sample_df_chat.apply(format_for_ai_chat, axis=1))
                         api_contents = []
+                        # 最初のユーザーターンにコンテキストを追加し、それ以降は単純な会話履歴とする
                         first_user_message = f"""以下のテキストデータ（コンテキスト）について質問があります。\n\n--- コンテキスト ---\n{context_text}\n\n--- 質問 ---\n{prompt}"""
+                        is_first_turn = len(st.session_state.chat_messages) == 1
+                        
+                        # 既存の履歴を変換
                         for msg in st.session_state.chat_messages[:-1]:
                              api_contents.append({"role": "user" if msg["role"] == "user" else "model", "parts": [{"text": msg["content"]}]})
-                        api_contents.append({"role": "user", "parts": [{"text": first_user_message if not api_contents else prompt}]})
+                        # 新しいユーザーメッセージ（初回ならコンテキスト付き）を追加
+                        api_contents.append({"role": "user", "parts": [{"text": first_user_message if is_first_turn else prompt}]})
+
                         response = call_gemini_api(api_contents, system_instruction=SYSTEM_PROMPT_CHAT)
                         st.session_state.chat_messages.append({"role": "assistant", "content": response})
                         with st.chat_message("assistant"): st.markdown(response)
+            # --- ▲ 修正完了 ▲ ---
 
     except Exception as e:
         st.error(f"ファイルの読み込みまたは分析中にエラーが発生しました: {e}")
