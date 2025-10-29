@@ -1,0 +1,8 @@
+streamlit
+pandas
+janome
+wordcloud
+networkx
+matplotlib
+japanize-matplotlib
+requests
