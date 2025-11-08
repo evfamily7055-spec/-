@@ -298,6 +298,7 @@ def parse_json_for_plotly(json_data_str):
         return None, None, None, "JSONに 'children' (クラスター) が見つかりません。"
 
     for cluster in clusters:
+        # AIは割合を含まない名前 (例: "クラスターA") を返す
         cluster_name = cluster.get('name', '不明なクラスター') 
         labels.append(cluster_name)
         parents.append(root_name)
@@ -309,6 +310,7 @@ def parse_json_for_plotly(json_data_str):
         else:
             cluster_total_value = 0
             for sub_topic in sub_topics:
+                # AIは割合を含まない名前 (例: "サブトピックA1") を返す
                 sub_name = sub_topic.get('name', '不明なトピック')
                 sub_value = sub_topic.get('value', 0)
                 
@@ -341,6 +343,7 @@ def create_plotly_treemap(json_data_str):
         values = values,
         
         # ▼ 修正点: ラベル(太字)と割合(改行)を指定
+        # %{percentRoot} は全体 (root) に対する割合
         texttemplate="<b>%{label}</b><br>%{percentRoot:.1%}",
         
         hoverinfo="label+value+percent root", # ホバー時の情報
