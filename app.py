@@ -3,32 +3,30 @@ import pandas as pd
 import re
 import requests # Gemini API呼び出し用
 import time # リトライ用
-import json # --- D3.js連携 / AI JSONパースのために追加 ---
-import squarify # --- Treemap描画のために追加 ---
+import json # --- JSONパースのために追加 ---
+import plotly.graph_objects as go # --- ▼ Plotly をインポート ---
 from janome.tokenizer import Tokenizer
 from wordcloud import WordCloud
-import networkx as nx
-# --- ▼ 修正点: コミュニティ検出アルゴリズムをインポート ---
+import networkx as nx 
 from networkx.algorithms.community import greedy_modularity_communities
-# --- ▲ 修正完了 ▲ ---
 import matplotlib.pyplot as plt
 import matplotlib.font_manager
 from collections import Counter
 from itertools import combinations
-import japanize_matplotlib # Matplotlibの日本語化
-import numpy as np # --- 統計計算のために追加 ---
-from scipy.stats import chi2_contingency # --- カイ二乗検定のために追加 ---
-import io # --- 画像ダウンロード機能のために追加 ---
-import base64 # --- HTMLレポートの画像埋込みのために追加 ---
-from streamlit.components.v1 import html # --- KWIC表示用のhtmlコンポーネント ---
+import japanize_matplotlib # Matplotlibの日本語化 (WordCloud と NetworkX で依然として必要)
+import numpy as np 
+from scipy.stats import chi2_contingency 
+import io 
+import base64 
+from streamlit.components.v1 import html 
 
 # --- 1. アプリの基本設定 ---
-st.set_page_config(page_title="統計＋AI 統合アナライザー (Treemap V2)", layout="wide")
-st.title("統計＋AI 統合テキストアナライザー 📊🤖 (Treemap V2)")
+st.set_page_config(page_title="統計＋AI 統合アナライザー (Plotly Ver.)", layout="wide")
+st.title("統計＋AI 統合テキストアナライザー 📊🤖 (Plotly Ver.)")
 st.write("Excelをアップロードし、テキスト列と分析軸（属性）を選択してください。統計分析とAIによる要約・クラスター分析を同時に実行します。")
 
 # --- 2. 形態素解析＆ストップワード設定 (キャッシュ) ---
-@st.cache_resource # 形態素解析器は重いのでキャッシュ
+@st.cache_resource 
 def get_tokenizer():
     return Tokenizer()
 
@@ -42,8 +40,8 @@ BASE_STOPWORDS = set([
 # AI分析の最大文字数制限を定義
 MAX_AI_INPUT_CHARS = 1000000
 
-@st.cache_data # テキストとTokenizerに変化がなければキャッシュ
-def extract_words(text, _tokenizer): # _tokenizer引数はキャッシュのキーとして使う
+@st.cache_data 
+def extract_words(text, _tokenizer): 
     if not isinstance(text, str):
         return []
     tokenizer = get_tokenizer()
@@ -54,7 +52,7 @@ def extract_words(text, _tokenizer): # _tokenizer引数はキャッシュのキ�
         if token.base_form.isdigit(): continue
         part_of_speech = token.part_of_speech.split(',')[0]
         if part_of_speech in ['名詞', '動詞', '形容詞']:
-            if len(token.base_form) > 1: # 文字数チェックのみ行う
+            if len(token.base_form) > 1: 
                 words.append(token.base_form)
     return words
 
@@ -139,6 +137,7 @@ SYSTEM_PROMPT_CLUSTER_JSON = """あなたは高度なテキストクラスタリ
 """
 
 # 4. クラスター分析 (テキスト解釈用) のシステムプロンプト
+# --- ▼ 修正点: Plotly に合わせて凡例の指示を修正 ---
 SYSTEM_PROMPT_CLUSTER_TEXT = """あなたはテキストアナリストです。以下のJSONは、テキストデータをクラスター分析した結果です。
 {analysis_scope_instruction}
 
@@ -150,15 +149,16 @@ SYSTEM_PROMPT_CLUSTER_TEXT = """あなたはテキストアナリストです。
 **必ず以下の構成に従ってください。**
 
 ## 凡例 (色と主要クラスター)
-（グラフの各色（例: 薄い緑、薄いオレンジなど）が、どの主要クラスターに対応しているかをリスト形式で説明してください。**色は `Set3` カラーマップの順番です。**）
-- [色1 (例: 薄い緑)]: [クラスターAの名前]
-- [色2 (例: 薄いオレンジ)]: [クラスターBの名前]
-- [色3 (例: 薄い青)]: [クラスターCの名前]
+（グラフの各色（例: 薄い青、薄い緑など）が、どの主要クラスターに対応しているかをリスト形式で説明してください。**色は自動で割り当てられています。**）
+- [色1 (例: 薄い青)]: [クラスターAの名前]
+- [色2 (例: 薄い緑)]: [クラスターBの名前]
+- [色3 (例: 薄いオレンジ)]: [クラスターCの名前]
 ...
 
 ## AIによるクラスターの解釈
 （次に、各主要クラスターがどのような意見グループなのかを詳細に説明してください。サブトピックにも触れながら、なぜそのように分類されたのかを具体的に考察してください。）
 """
+# --- ▲ 修正完了 ▲ ---
 
 
 # 5. 会話用プロンプト (可変)
@@ -259,69 +259,97 @@ def calculate_characteristic_words(_df, attribute_col, text_col, _stopwords_set)
         characteristic_words.sort(key=lambda x: x[1]); results[attr_value] = characteristic_words[:20]
     return results
 
-# --- `squarify` (matplotlib) を使ったTreemap描画関数 ---
-def create_treemap_figure(json_data_str):
+# --- ▼ 修正点: Plotly Treemap 用のデータ変換関数 ---
+def parse_json_for_plotly(json_data_str):
+    """AIのネストされたJSONを、Plotly Treemap用のリストに変換する"""
     try:
         data = json.loads(json_data_str)
-        if 'children' not in data or not data['children']:
-            return None, "JSONデータに有効な 'children' (クラスター) が見つかりません。"
-    except json.JSONDecodeError:
-        return None, "AIが生成したJSONの解析に失敗しました。"
-    except TypeError:
-         return None, "AIの応答が空または不正です。"
+    except Exception as e:
+        return None, None, None, f"JSON解析エラー: {e}"
 
-    sizes = []
     labels = []
-    color_list = []
+    parents = []
+    values = []
     
-    # 色を "tab10" から "Set3" (パステルカラー) に変更
-    cmap = plt.get_cmap("Set3")
-    cluster_colors = {}
-    color_index = 0
+    root_name = data.get('name', '全体')
+    labels.append(root_name)
+    parents.append("")
+    values.append(0) # ルートの値は0 (自動集計される)
+    
+    total_value = 0
+    
+    clusters = data.get('children', [])
+    if not clusters:
+        return None, None, None, "JSONに 'children' (クラスター) が見つかりません。"
 
-    for cluster in data.get('children', []):
+    for cluster in clusters:
         cluster_name = cluster.get('name', '不明なクラスター')
-        
-        if cluster_name not in cluster_colors:
-            cluster_colors[cluster_name] = cmap(color_index % 12) # Set3は12色
-            color_index += 1
-        cluster_color = cluster_colors[cluster_name]
+        labels.append(cluster_name)
+        parents.append(root_name)
         
         sub_topics = cluster.get('children', [])
+        
         if not sub_topics:
-            continue 
+             # サブトピックがない場合、このクラスター自体を葉ノードとして扱う (value=1)
+             values.append(1) 
+             total_value += 1
         else:
+            # サブトピックがある場合、親（クラスター）の value は 0
+            values.append(0)
+            cluster_total_value = 0
             for sub_topic in sub_topics:
+                sub_name = sub_topic.get('name', '不明なトピック')
                 sub_value = sub_topic.get('value', 0)
-                if sub_value > 0: 
-                    sizes.append(sub_value)
-                    labels.append(sub_topic.get('name', '不明なトピック'))
-                    color_list.append(cluster_color) 
+                
+                if sub_value > 0:
+                    labels.append(sub_name)
+                    parents.append(cluster_name)
+                    values.append(sub_value)
+                    cluster_total_value += sub_value
+            
+            if cluster_total_value == 0:
+                # サブトピックはあったが、すべてvalue=0だった場合
+                # 親クラスターに最小値1を与えて表示させる
+                values[-1] = 1 # 親クラスターのvalueを1にする
+                total_value += 1
+            else:
+                total_value += cluster_total_value
 
-    if not sizes:
-        return None, "描画対象となるサブトピック（value > 0）が見つかりませんでした。"
+    return labels, parents, values, None
+# --- ▲ 修正完了 ▲ ---
 
-    try:
-        fig, ax = plt.subplots(figsize=(16, 9))
+
+# --- ▼ 修正点: `Plotly` を使ったTreemap描画関数 ---
+def create_plotly_treemap(json_data_str):
+    """
+    AIが生成したJSONデータから、Plotlyを使用して
+    インタラクティブなTreemapを生成します。
+    """
+    labels, parents, values, error = parse_json_for_plotly(json_data_str)
+    
+    if error:
+        return None, error
         
-        # 輪郭(edgecolor)と文字(text_kwargs)を調整
-        squarify.plot(
-            sizes=sizes, 
-            label=labels, 
-            color=color_list, 
-            ax=ax,
-            edgecolor="white", # 輪郭を白に
-            linewidth=2,       # 輪郭の太さを2に
-            text_kwargs={'color':'#222222', 'fontsize':10, 'wrap':True} # 文字を濃いグレーに、自動折り返し
-        )
-        
-        ax.set_title("トピック構成 (Treemap)", fontsize=18)
-        ax.axis('off')
-        
-        plt.close(fig) # メモリ解放
-        return fig, None
-    except Exception as e:
-        return None, f"Treemap描画中にエラーが発生: {e}"
+    fig = go.Figure(go.Treemap(
+        labels = labels,
+        parents = parents,
+        values = values,
+        textinfo = "label+percent root", # ラベルと全体に対する割合を表示
+        root_color="lightgrey",
+        marker_colorscale='Plotly3', # Set3に近いパステルカラー
+        hoverinfo="label+value+percent root", # ホバー時の情報
+        textfont={"size": 14},
+        pathbar_textfont={'size': 16} # 上部の階層バーの文字サイズ
+    ))
+    
+    fig.update_layout(
+        margin = dict(t=50, l=10, r=10, b=10), # タイトル用に上マージンを確保
+        title_text="トピック構成 (Treemap)",
+        title_font_size=20
+    )
+    
+    return fig, None
+# --- ▲ 修正完了 ▲ ---
 
 
 # --- 感情分析円グラフ描画関数 ---
@@ -398,45 +426,40 @@ def generate_wordcloud(_words_list, font_path, _stopwords_set):
             return fig_wc, None
     except Exception as e: return None, f"WordCloud生成失敗: {e}"
 
-# --- ▼ 修正点: 共起ネットワークのロジックを大幅改善 ---
-# --- 8. 共起ネットワーク生成関数 ---
+# --- 8. 共起ネットワーク生成関数 (改善版) ---
 def generate_network(_words_df, font_path, _stopwords_set):
     
-    # 1. 共起ペアの頻度をカウント
     co_occur_counter = Counter()
     for words in _words_df:
         unique_words = sorted(list(set(word for word in words if word not in _stopwords_set)))
         for w1, w2 in combinations(unique_words, 2): co_occur_counter[(w1, w2)] += 1
     
-    # 抽出するペア数を 70 に
     top_pairs = co_occur_counter.most_common(70) 
     
     if not top_pairs:
         return None, "共起ネットワーク生成不可（共起ペア不足）。"
 
-    # 2. グラフの構築
     G = nx.Graph()
     for (w1, w2), weight in top_pairs:
         G.add_edge(w1, w2, weight=weight)
         
-    # 3. ノードのサイズを計算 (単語の全体での出現頻度)
     all_words_in_docs = [word for sublist in _words_df for word in sublist if word not in _stopwords_set]
     all_word_freq = Counter(all_words_in_docs)
     
     nodes_in_graph = list(G.nodes())
     node_sizes = []
     for node in nodes_in_graph:
-        # 頻度に基づいてサイズを計算 (最小500, 最大5000)
-        size = all_word_freq.get(node, 1) * 30 # 係数を調整
+        size = all_word_freq.get(node, 1) * 30 
         node_sizes.append(max(500, min(size, 5000))) 
 
-    # 4. コミュニティ検出 (色分けのため)
     try:
         communities_generator = greedy_modularity_communities(G)
         communities = sorted(communities_generator, key=len, reverse=True)
         
         community_map = {}
-        cmap = plt.get_cmap('Set3', len(communities)) # Treemapと同じ 'Set3' を使用
+        # --- ▼ 修正点: Treemap とは異なるカラーマップを使用 (Plotly3) ---
+        # Set3 は色が薄すぎるため、ネットワークでは Plotly3 (Plotly のデフォルト) を使う
+        cmap = plt.get_cmap('Plotly3', len(communities)) 
         
         for i, community in enumerate(communities):
             for node in community:
@@ -444,45 +467,39 @@ def generate_network(_words_df, font_path, _stopwords_set):
         
         node_colors = [community_map[node] for node in G.nodes()]
     except Exception:
-        # コミュニティ検出が失敗した場合 (グラフが単純すぎる等)
-        node_colors = 'lightblue' # 従来の色に戻す
+        node_colors = 'lightblue' 
 
-    # 5. エッジの太さを計算 (共起頻度)
-    edge_weights = [d['weight'] * 0.3 for u,v,d in G.edges(data=True)] # 係数を 0.1 -> 0.3 に
+    edge_weights = [d['weight'] * 0.3 for u,v,d in G.edges(data=True)] 
 
     try:
-        # 6. 描画
-        fig_net, ax = plt.subplots(figsize=(18, 18)); # グラフサイズを大きく
+        fig_net, ax = plt.subplots(figsize=(18, 18)); 
         
-        # k=1.0 でノード間を広げる
         pos = nx.spring_layout(G, k=1.0, iterations=50) 
         
         nx.draw_networkx_nodes(
             G, 
             pos, 
-            node_size=node_sizes,    # 動的サイズ
-            node_color=node_colors   # コミュニティ色
+            node_size=node_sizes,    
+            node_color=node_colors   
         )
         
         nx.draw_networkx_edges(
             G, 
             pos, 
-            width=edge_weights,     # 動的な太さ
+            width=edge_weights,     
             alpha=0.4, 
             edge_color='gray'
         )
         
-        # ラベルのフォントサイズを小さく
         labels_kwargs = {'font_size': 9, 'font_family': 'IPAexGothic'} if font_path else {'font_size': 9}
         nx.draw_networkx_labels(G, pos, **labels_kwargs)
         
         ax.axis('off')
-        plt.close(fig_net) # メモリ解放
+        plt.close(fig_net) 
         return fig_net, None
         
     except Exception as e:
         return None, f"ネットワーク描画エラー: {e}"
-# --- ▲ 修正完了 ▲ ---
 
 
 # 単語頻度計算関数
@@ -494,11 +511,34 @@ def calculate_frequency(_words_list, _stopwords_set, top_n=50):
     freq_df['Rank'] = freq_df.index + 1
     return freq_df[['Rank', 'Word', 'Frequency']]
 
+# --- ▼ 修正点: Plotly Figure にも対応した fig_to_bytes ---
 # HTMLレポート生成関数
-def fig_to_base64_png(fig):
+def fig_to_bytes(fig):
     if fig is None: return None
-    buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches="tight"); buf.seek(0)
-    return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
+    # Matplotlib Figure の場合
+    if isinstance(fig, plt.Figure):
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
+        buf.seek(0)
+        return buf.getvalue()
+    # Plotly Figure の場合
+    elif isinstance(fig, go.Figure):
+        try:
+            # kaleido が必要
+            return fig.to_image(format="png", width=1200, height=700, scale=2)
+        except ImportError:
+            st.error("HTMLレポートへの画像埋め込みには `kaleido` が必要です。`requirements.txt` に `kaleido` を追加してください。")
+            return None
+        except Exception as e:
+            st.error(f"Plotly画像の書き出しエラー: {e}")
+            return None
+    return None
+# --- ▲ 修正完了 ▲ ---
+
+def fig_to_base64_png(fig):
+    img_bytes = fig_to_bytes(fig)
+    if img_bytes is None: return None
+    return f"data:image/png;base64,{base64.b64encode(img_bytes).decode('utf-8')}"
 
 def generate_html_report():
     html_parts = ["<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'><title>テキスト分析レポート</title>"]
@@ -511,6 +551,7 @@ def generate_html_report():
         if img_base64: html_parts.append(f"<div class='result-section'><h2>💖 AI 感情分析</h2><img src='{img_base64}' alt='Sentiment Pie Chart'></div>")
 
     if 'fig_treemap_display' in st.session_state and st.session_state.fig_treemap_display:
+        # --- ▼ 修正点: Plotly の Figure にも fig_to_base64_png が対応 ---
         img_base64 = fig_to_base64_png(st.session_state.fig_treemap_display);
         if img_base64: html_parts.append(f"<div class='result-section'><h2>📊 AI クラスター分析 (Treemap)</h2><img src='{img_base64}' alt='Treemap'></div>")
     if 'ai_result_cluster_text' in st.session_state: html_parts.append(f"<div class='result-section'><h2>📊 AI クラスター分析 (解釈)</h2><pre>{st.session_state.ai_result_cluster_text}</pre></div>")
@@ -537,10 +578,7 @@ def generate_html_report():
 # --- 9. メイン画面のUI ---
 uploaded_file = st.file_uploader("1. Excelファイル (xlsx) をアップロード", type=["xlsx"])
 
-def fig_to_bytes(fig):
-    if fig is None: return None
-    buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches="tight"); buf.seek(0)
-    return buf.getvalue()
+# def fig_to_bytes(fig): ... (上へ移動)
 
 if uploaded_file:
     try:
@@ -806,10 +844,10 @@ if uploaded_file:
                     st.info("感情分析データを生成中です...")
 
 
-            # --- AI クラスター分析タブ (JSON + Matplotlib/squarify) ---
+            # --- AI クラスター分析タブ (JSON + Plotly Treemap) ---
             with tab_cluster:
                 st.subheader("AIによる言説クラスター分析 (Treemap)")
-                st.info("AIがテキストを階層的なトピックに分類し、その構成比（面積）を可視化します。色の凡例と解釈は、グラフの下に表示されます。")
+                st.info("AIがテキストを階層的なトピックに分類し、その構成比（面積）を可視化します。グラフ右上のカメラアイコンから画像を保存できます。")
 
                 # 1. JSONデータの生成 (キャッシュ確認)
                 if 'ai_result_cluster_json' not in st.session_state:
@@ -840,11 +878,12 @@ if uploaded_file:
                         text_summary = call_gemini_api(contents_text, system_instruction=system_instr_text)
                         st.session_state.ai_result_cluster_text = text_summary
                 
-                # 3. Treemap (Matplotlib/Squarify) の描画 (キャッシュ確認)
+                # --- ▼ 修正点: Plotly を使った描画に変更 ---
+                # 3. Treemap (Plotly) の描画 (キャッシュ確認)
                 if 'fig_treemap_display' not in st.session_state and 'ai_result_cluster_json' in st.session_state:
                     with st.spinner("Treemapを生成中... (ステップ3/3)"):
                         json_data_str = st.session_state.ai_result_cluster_json
-                        fig_treemap, treemap_error = create_treemap_figure(json_data_str)
+                        fig_treemap, treemap_error = create_plotly_treemap(json_data_str) # Plotly関数を呼び出す
                         st.session_state.fig_treemap_display = fig_treemap
                         st.session_state.treemap_error_display = treemap_error
 
@@ -852,10 +891,9 @@ if uploaded_file:
                 if 'fig_treemap_display' in st.session_state and st.session_state.fig_treemap_display:
                     st.subheader("トピック構成 (Treemap)")
                     fig_treemap = st.session_state.fig_treemap_display
-                    st.pyplot(fig_treemap)
+                    st.plotly_chart(fig_treemap, use_container_width=True) # st.pyplot -> st.plotly_chart
                     
-                    img_bytes = fig_to_bytes(fig_treemap)
-                    if img_bytes: st.download_button("この画像をダウンロード (PNG)", img_bytes, "treemap.png", "image/png")
+                    # ダウンロードボタンは Plotly が自動で提供するため削除
 
                     if 'ai_result_cluster_text' in st.session_state:
                         # 凡例と解釈はAIの応答に任せる
@@ -869,6 +907,7 @@ if uploaded_file:
                          st.text_area("AIのJSONレスポンス", st.session_state.ai_result_cluster_json, height=200)
                 else:
                     st.info("クラスター分析データを生成中です...")
+            # --- ▲ 修正完了 ▲ ---
             
             # --- Tab 2: WordCloud --- (tab2 に変更)
             with tab2:
@@ -974,9 +1013,7 @@ if uploaded_file:
             with tab4:
                 if 'fig_net_display' not in st.session_state:
                     with st.spinner("共起ネットワークを生成中..."):
-                        # --- ▼ 修正点: generate_network に df_analyzed['words'] を渡す ---
                         fig_net, net_error = generate_network(df_analyzed['words'], font_path, current_stopwords_set)
-                        # --- ▲ 修正完了 ▲ ---
                         st.session_state.fig_net_display = fig_net
                         st.session_state.net_error_display = net_error
                 if st.session_state.fig_net_display:
