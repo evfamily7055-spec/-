@@ -4,10 +4,13 @@ import re
 import requests # Gemini API呼び出し用
 import time # リトライ用
 import json # --- D3.js連携 / AI JSONパースのために追加 ---
-import squarify # --- ▼ Treemap描画のために追加 ---
+import squarify # --- Treemap描画のために追加 ---
 from janome.tokenizer import Tokenizer
 from wordcloud import WordCloud
 import networkx as nx
+# --- ▼ 修正点: コミュニティ検出アルゴリズムをインポート ---
+from networkx.algorithms.community import greedy_modularity_communities
+# --- ▲ 修正完了 ▲ ---
 import matplotlib.pyplot as plt
 import matplotlib.font_manager
 from collections import Counter
@@ -395,33 +398,92 @@ def generate_wordcloud(_words_list, font_path, _stopwords_set):
             return fig_wc, None
     except Exception as e: return None, f"WordCloud生成失敗: {e}"
 
+# --- ▼ 修正点: 共起ネットワークのロジックを大幅改善 ---
 # --- 8. 共起ネットワーク生成関数 ---
 def generate_network(_words_df, font_path, _stopwords_set):
+    
+    # 1. 共起ペアの頻度をカウント
     co_occur_counter = Counter()
     for words in _words_df:
         unique_words = sorted(list(set(word for word in words if word not in _stopwords_set)))
         for w1, w2 in combinations(unique_words, 2): co_occur_counter[(w1, w2)] += 1
     
+    # 抽出するペア数を 70 に
     top_pairs = co_occur_counter.most_common(70) 
     
-    if top_pairs:
-        G = nx.Graph()
-        for (w1, w2), weight in top_pairs: G.add_edge(w1, w2, weight=weight)
+    if not top_pairs:
+        return None, "共起ネットワーク生成不可（共起ペア不足）。"
+
+    # 2. グラフの構築
+    G = nx.Graph()
+    for (w1, w2), weight in top_pairs:
+        G.add_edge(w1, w2, weight=weight)
         
-        fig_net, ax = plt.subplots(figsize=(16, 16)); 
-        pos = nx.spring_layout(G, k=0.9, iterations=50) 
+    # 3. ノードのサイズを計算 (単語の全体での出現頻度)
+    all_words_in_docs = [word for sublist in _words_df for word in sublist if word not in _stopwords_set]
+    all_word_freq = Counter(all_words_in_docs)
+    
+    nodes_in_graph = list(G.nodes())
+    node_sizes = []
+    for node in nodes_in_graph:
+        # 頻度に基づいてサイズを計算 (最小500, 最大5000)
+        size = all_word_freq.get(node, 1) * 30 # 係数を調整
+        node_sizes.append(max(500, min(size, 5000))) 
+
+    # 4. コミュニティ検出 (色分けのため)
+    try:
+        communities_generator = greedy_modularity_communities(G)
+        communities = sorted(communities_generator, key=len, reverse=True)
         
-        nx.draw_networkx_nodes(G, pos, node_size=2000, node_color='lightblue', alpha=0.8)
+        community_map = {}
+        cmap = plt.get_cmap('Set3', len(communities)) # Treemapと同じ 'Set3' を使用
         
-        edge_weights = [d['weight'] * 0.1 for u,v,d in G.edges(data=True)] 
+        for i, community in enumerate(communities):
+            for node in community:
+                community_map[node] = cmap(i)
         
-        nx.draw_networkx_edges(G, pos, width=edge_weights, alpha=0.4, edge_color='gray')
-        labels_kwargs = {'font_size': 10, 'font_family': 'IPAexGothic'} if font_path else {'font_size': 10}
+        node_colors = [community_map[node] for node in G.nodes()]
+    except Exception:
+        # コミュニティ検出が失敗した場合 (グラフが単純すぎる等)
+        node_colors = 'lightblue' # 従来の色に戻す
+
+    # 5. エッジの太さを計算 (共起頻度)
+    edge_weights = [d['weight'] * 0.3 for u,v,d in G.edges(data=True)] # 係数を 0.1 -> 0.3 に
+
+    try:
+        # 6. 描画
+        fig_net, ax = plt.subplots(figsize=(18, 18)); # グラフサイズを大きく
+        
+        # k=1.0 でノード間を広げる
+        pos = nx.spring_layout(G, k=1.0, iterations=50) 
+        
+        nx.draw_networkx_nodes(
+            G, 
+            pos, 
+            node_size=node_sizes,    # 動的サイズ
+            node_color=node_colors   # コミュニティ色
+        )
+        
+        nx.draw_networkx_edges(
+            G, 
+            pos, 
+            width=edge_weights,     # 動的な太さ
+            alpha=0.4, 
+            edge_color='gray'
+        )
+        
+        # ラベルのフォントサイズを小さく
+        labels_kwargs = {'font_size': 9, 'font_family': 'IPAexGothic'} if font_path else {'font_size': 9}
         nx.draw_networkx_labels(G, pos, **labels_kwargs)
+        
         ax.axis('off')
         plt.close(fig_net) # メモリ解放
         return fig_net, None
-    return None, "共起ネットワーク生成不可（共起ペア不足）。"
+        
+    except Exception as e:
+        return None, f"ネットワーク描画エラー: {e}"
+# --- ▲ 修正完了 ▲ ---
+
 
 # 単語頻度計算関数
 def calculate_frequency(_words_list, _stopwords_set, top_n=50):
@@ -912,7 +974,9 @@ if uploaded_file:
             with tab4:
                 if 'fig_net_display' not in st.session_state:
                     with st.spinner("共起ネットワークを生成中..."):
+                        # --- ▼ 修正点: generate_network に df_analyzed['words'] を渡す ---
                         fig_net, net_error = generate_network(df_analyzed['words'], font_path, current_stopwords_set)
+                        # --- ▲ 修正完了 ▲ ---
                         st.session_state.fig_net_display = fig_net
                         st.session_state.net_error_display = net_error
                 if st.session_state.fig_net_display:
@@ -927,13 +991,15 @@ if uploaded_file:
                         1.  **単語抽出**: WordCloudと同様に、名詞・動詞・形容詞からストップワードと数字を除外した単語リストを使用しました。
                         2.  **共起の定義**: 1つのドキュメント（Excelの1行）内で同時に出現した単語ペアを「共起」として定義しました。
                         3.  **頻度集計**: 全ドキュメントを対象に、共起する単語ペアの出現頻度を集計しました。
-                        4.  **ネットワーク構築**: 共起頻度が高かった上位70ペアを抽出し、`NetworkX` ライブラリを用いてネットワークを構築しました。(ノード数を70に増やしました)
-                        5.  **可視化**: 単語をノード（点）、単語間の共起関係をエッジ（線）として描画しました。エッジの太さは共起頻度の高さ（関係の強さ）を反映しています（係数: 0.1）。(エッジを細くしました)
+                        4.  **ネットワーク構築**: 共起頻度が高かった上位70ペアを抽出し、`NetworkX` ライブラリを用いてネットワークを構築しました。
+                        5.  **ノードのサイズ**: 各単語の**全体での出現頻度**に基づき、ノード（円）のサイズを動的に変更しました。
+                        6.  **ノードの色**: `greedy_modularity_communities` アルゴリズムを用い、関連性の高い単語グループ（コミュニティ）を検出し、グループごとに色分けしました。
+                        7.  **エッジの太さ**: 共起頻度（関係の強さ）に基づき、エッジ（線）の太さを動的に変更しました（係数: 0.3）。
                         
                         #### 2. 論文記述例
-                        > ...次に、単語間の関連性を探索するため、共起ネットワーク分析を実施した。分析対象の単語（名詞、動詞、形容詞）が1ドキュメント（行）内で同時に出現した場合を「共起」と定義し、その頻度を集計した。共起頻度上位70ペアに基づきネットワーク（図2）を描画した。
+                        > ...次に、単語間の関連性を探索するため、共起ネットワーク分析を実施した。共起頻度上位70ペアに基づきネットワーク（図2）を描画した。ノードのサイズは各単語の出現頻度を、エッジの太さは共起頻度を反映している。また、`greedy_modularity_communities` アルゴリズムによるコミュニティ検出を実行し、抽出されたクラスターごとに色分けを行った。
                         >
-                        > 図2より、[単語A]と[単語B]が強い共起関係（太いエッジ）にあることが確認された。また、[単語C]を中心として[単語D, E, F]がクラスターを形成しており、...といった文脈で語られていることが示唆された。
+                        > 図2より、[単語A]や[単語B]が（大きなノードで示されるように）高頻度で出現していることがわかる。また、[単語C, D, E]が同じ色（[色]）のコミュニティを形成しており、これらが密接に関連するトピック群であることが示唆された。
                     """)
 
             # --- Tab 5: KWIC (文脈検索) --- (tab5 に変更)
