@@ -19,8 +19,8 @@ import base64 # --- HTMLレポートの画像埋込みのために追加 ---
 from streamlit.components.v1 import html # --- KWIC表示用のhtmlコンポーネント ---
 
 # --- 1. アプリの基本設定 ---
-st.set_page_config(page_title="統計＋AI 統合アナライザー (Pack Ver.)", layout="wide")
-st.title("統計＋AI 統合テキストアナライザー 📊🤖 (Pack Ver.)")
+st.set_page_config(page_title="統計＋AI 統合アナライザー (Treemap Ver.)", layout="wide")
+st.title("統計＋AI 統合テキストアナライザー 📊🤖 (Treemap Ver.)")
 st.write("Excelをアップロードし、テキスト列と分析軸（属性）を選択してください。統計分析とAIによる要約・クラスター分析を同時に実行します。")
 
 # --- 2. 形態素解析＆ストップワード設定 (キャッシュ) ---
@@ -216,8 +216,8 @@ def calculate_characteristic_words(_df, attribute_col, text_col, _stopwords_set)
         characteristic_words.sort(key=lambda x: x[1]); results[attr_value] = characteristic_words[:20]
     return results
 
-# --- ▼ 修正点: D3.js パックレイアウト (Circle Packing) を描画するHTMLを生成 ---
-def create_pack_layout_html(json_data_str):
+# --- ▼ 修正点: D3.js ツリーマップ (Treemap) を描画するHTMLを生成 ---
+def create_treemap_html(json_data_str):
     # D3.js (v7) を使用
     # .replace() 方式で、Pythonの {} と JSの ${} の衝突を回避する
     html_template = """ 
@@ -225,7 +225,7 @@ def create_pack_layout_html(json_data_str):
     <html lang="ja">
     <head>
         <meta charset="UTF-8">
-        <title>Pack Layout Chart</title>
+        <title>Treemap Chart</title>
         <script src="https://d3js.org/d3.v7.min.js"></script>
         <style>
             body {
@@ -262,27 +262,24 @@ def create_pack_layout_html(json_data_str):
                 display: block;
                 margin: auto;
             }
-            circle {
+            rect {
                 cursor: pointer;
             }
-            circle:hover {
+            rect:hover {
                 opacity: 0.8;
             }
             text {
-                font-size: 12px;
+                font-size: 14px;
+                font-weight: bold;
                 pointer-events: none;
-                fill: #333; /* 円の中の文字は黒（または暗い色）で固定 */
+                fill: #fff; /* Treemapのラベルは白（または明るい色）で固定 */
                 text-anchor: middle;
             }
             /* サブトピック（深さ2）の文字は少し小さく */
             text.depth-2 {
-                 font-size: 10px;
+                 font-size: 11px;
+                 font-weight: normal;
             }
-            /* Streamlitダークテーマ対応: textの色を上書き */
-            body[data-theme="dark"] text {
-                 fill: #333; /* ダークテーマでも、円の中の文字は暗い色を維持 */
-            }
-
         </style>
     </head>
     <body>
@@ -296,19 +293,19 @@ def create_pack_layout_html(json_data_str):
             const height = 550; // チャートの高さ
             const color = d3.scaleOrdinal(d3.schemeCategory10);
 
-            // 2. 階層データ構造の作成 (d3.pack)
-            // .sum() で value に基づいて円のサイズを決定
-            // .sort() で大きいものが中央に来やすくなる
+            // 2. 階層データ構造の作成 (d3.treemap)
             const root = d3.hierarchy(data)
-                .sum(d => d.value)
+                .sum(d => d.value) // value に基づいて面積を決定
                 .sort((a, b) => b.value - a.value);
 
-            // 3. パックレイアウトの作成
-            const pack = d3.pack()
-                .size([width - 40, height - 40]) // 少し余白(padding)をもたせる
-                .padding(3);
-                
-            const nodes = pack(root).descendants();
+            // 3. Treemapレイアウトの作成
+            const treemap = d3.treemap()
+                .size([width, height])
+                .paddingInner(1) // タイル間のパディング
+                .paddingOuter(1)
+                .paddingTop(18); // 親タイルのラベル用に上部にパディング
+
+            treemap(root);
 
             // 4. SVGコンテナの作成
             const svg = d3.select("#chart").append("svg")
@@ -320,20 +317,26 @@ def create_pack_layout_html(json_data_str):
             // 5. ツールチップの選択
             const tooltip = d3.select("#tooltip");
 
-            // 6. ノード（円）の描画
-            const node = svg.selectAll("g")
-                .data(nodes)
+            // 6. ノード（セル）の作成
+            const cell = svg.selectAll("g")
+                .data(root.descendants()) // 全てのノード（親も含む）を描画
                 .join("g")
-                .attr("transform", d => `translate(${d.x},${d.y})`);
+                .attr("transform", d => `translate(${d.x0},${d.y0})`);
 
-            node.append("circle")
-                .attr("r", d => d.r)
-                .attr("fill", d => d.depth === 0 ? "#fff" : color(d.depth === 1 ? d.data.name : d.parent.data.name)) // 深さ0(全体)は透明、深さ1(クラスター)で色分け
-                .attr("fill-opacity", d => d.depth === 0 ? 0 : (d.depth === 1 ? 0.4 : 0.8)) // 深さ1を半透明に
-                .attr("stroke", d => d.depth === 0 ? "none" : (d.depth === 1 ? "#999" : color(d.parent.data.name)))
-                .attr("stroke-width", d => d.depth === 1 ? 2 : 1)
+            // 7. 長方形の描画
+            cell.append("rect")
+                .attr("width", d => d.x1 - d.x0)
+                .attr("height", d => d.y1 - d.y0)
+                .attr("fill", d => {
+                    // 深さ0(全体)は透明に
+                    if (d.depth === 0) return "none";
+                    // 深さ1(クラスター)は色分け、深さ2(サブトピック)は親と同じ色
+                    return color(d.depth === 1 ? d.data.name : d.parent.data.name);
+                })
+                .attr("fill-opacity", d => d.depth === 1 ? 0.6 : 0.9) // 深さ1を少し薄く
+                .attr("stroke", "#fff")
                 .on("mouseover", (event, d) => {
-                    if (d.depth === 0) return; // 全体の円はツールチップ不要
+                    if (d.depth === 0) return;
                     tooltip.transition().duration(200).style("opacity", .9);
                     let percent = (d.value / root.value * 100).toFixed(1);
                     tooltip.html(`<b>${d.data.name}</b><br>全体に占める割合: ${percent}%`) 
@@ -344,28 +347,30 @@ def create_pack_layout_html(json_data_str):
                     tooltip.transition().duration(500).style("opacity", 0);
                 });
 
-            // 7. ラベルの追加
-            node.append("text")
-                .attr("class", d => `depth-${d.depth}`) // 深さに応じてclassを付与
-                .attr("clip-path", d => `circle(${d.r - 5})`) // 円からはみ出ないようにクリップ
-                .selectAll("tspan")
-                .data(d => {
-                    // ラベルを ( と % で分割して改行処理
-                    if (d.depth === 0) return []; // 全体(root)にはラベル不要
+            // 8. ラベルの追加
+            cell.append("text")
+                .attr("class", d => `depth-${d.depth}`)
+                .attr("x", d => (d.x1 - d.x0) / 2) // 長方形の中央に配置
+                .attr("y", d => (d.y1 - d.y0) / 2)
+                .attr("dy", "0.35em")
+                .text(d => {
+                    // 深さ0(全体)はラベル不要
+                    if (d.depth === 0) return null;
+                    // 小さすぎるタイルにはラベルを表示しない
+                    if (d.x1 - d.x0 < 60 || d.y1 - d.y0 < 20) return null;
+                    
                     const name = d.data.name;
-                    // (XX.X%) を見つけて分割
-                    const match = name.match(/(.+) \((\d+\.\d+%)\)$/);
-                    if (match && d.r > 20) { // 半径が小さすぎる場合はラベルを表示しない
-                        return [match[1], `(${match[2]})`]; // [トピック名, (XX.X%)]
-                    } else if (d.r > 15) {
-                        return [name];
-                    }
-                    return [];
-                })
-                .join("tspan")
-                .attr("x", 0)
-                .attr("y", (d, i, nodes) => `${i - (nodes.length - 1) * 0.5 + 0.3}em`) // 2行の場合に中央揃え
-                .text(d => d);
+                    return name.length > 20 ? name.substring(0, 20) + "..." : name;
+                });
+            
+            // 8b. 親ラベル (深さ1) を上部パディング領域に別途描画
+            cell.filter(d => d.depth === 1) // 深さ1(クラスター)のみ選択
+                .select("text")
+                .attr("y", 10) // paddingTop(18) の領域に配置
+                .attr("dy", 0)
+                .style("font-size", "14px")
+                .style("font-weight", "bold");
+
 
         </script>
     </body>
@@ -377,7 +382,6 @@ def create_pack_layout_html(json_data_str):
     except json.JSONDecodeError:
         json_payload = '{"name": "JSONエラー", "children": []}'
     except TypeError:
-        # json_data_str が None などの場合
         json_payload = '{"name": "JSONエラー(Type)", "children": []}'
         
     # .replace() を使って安全にJSONデータを挿入
@@ -608,10 +612,10 @@ if uploaded_file:
                         st.session_state.ai_result_simple = call_gemini_api(contents, system_instruction=system_instr_s)
                 st.markdown(st.session_state.ai_result_simple)
 
-            # --- (新設) AI クラスター分析タブ (JSON + D3.js Pack Layout) ---
+            # --- ▼ 修正点: (新設) AI クラスター分析タブ (JSON + D3.js Treemap) ---
             with tab_cluster:
-                st.subheader("AIによる言説クラスター分析 (Pack Layout)")
-                st.info("AIがテキストを階層的なトピックに分類し、その構成比（円の面積）を可視化します。円はマウスオーバーで詳細を確認できます。")
+                st.subheader("AIによる言説クラスター分析 (Treemap)")
+                st.info("AIがテキストを階層的なトピックに分類し、その構成比（面積）を可視化します。ブロックはマウスオーバーで詳細を確認できます。")
 
                 # 1. JSONデータの生成 (キャッシュ確認)
                 if 'ai_result_cluster_json' not in st.session_state:
@@ -687,9 +691,9 @@ if uploaded_file:
                         else:
                             json.loads(json_data_str) # パースチェック
                             
-                            st.subheader("トピック構成 (Pack Layout)")
-                            pack_layout_html_content = create_pack_layout_html(json_data_str)
-                            html(pack_layout_html_content, height=600, scrolling=False)
+                            st.subheader("トピック構成 (Treemap)")
+                            treemap_html_content = create_treemap_html(json_data_str) # 呼び出す関数を変更
+                            html(treemap_html_content, height=600, scrolling=False) # 関数名を変更
                             
                             if 'ai_result_cluster_text' in st.session_state:
                                 st.subheader("AIによるクラスターの解釈")
@@ -701,10 +705,11 @@ if uploaded_file:
                         st.error("AIによるJSON生成に失敗しました。AIが有効なJSONを返せませんでした。")
                         st.text_area("AIの生レスポンス (エラー)", json_data_str, height=200)
                     except Exception as e:
-                        st.error(f"Pack Layoutチャートの描画エラー: {e}")
+                        st.error(f"Treemapチャートの描画エラー: {e}")
                         st.text_area("AIのJSONレスポンス", json_data_str, height=200)
                 else:
                     st.info("クラスター分析データを生成中です...")
+            # --- ▲ 修正完了 ▲ ---
             
             # --- Tab 2: WordCloud --- (tab2 に変更)
             with tab2:
