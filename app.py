@@ -3,6 +3,7 @@ import pandas as pd
 import re
 import requests # Gemini API呼び出し用
 import time # リトライ用
+import json # --- D3.js連携 / AI JSONパースのために追加 ---
 from janome.tokenizer import Tokenizer
 from wordcloud import WordCloud
 import networkx as nx
@@ -18,9 +19,9 @@ import base64 # --- HTMLレポートの画像埋込みのために追加 ---
 from streamlit.components.v1 import html # --- KWIC表示用のhtmlコンポーネント ---
 
 # --- 1. アプリの基本設定 ---
-st.set_page_config(page_title="統計＋AI 統合アナライザー", layout="wide")
-st.title("統計＋AI 統合テキストアナライザー 📊🤖")
-st.write("Excelをアップロードし、テキスト列と分析軸（属性）を選択してください。統計分析とAIによる要約を同時に実行します。")
+st.set_page_config(page_title="統計＋AI 統合アナライザー (Sunburst Ver.)", layout="wide")
+st.title("統計＋AI 統合テキストアナライザー 📊🤖 (Sunburst Ver.)")
+st.write("Excelをアップロードし、テキスト列と分析軸（属性）を選択してください。統計分析とAIによる要約・クラスター分析を同時に実行します。")
 
 # --- 2. 形態素解析＆ストップワード設定 (キャッシュ) ---
 @st.cache_resource # 形態素解析器は重いのでキャッシュ
@@ -96,57 +97,64 @@ SYSTEM_PROMPT_ACADEMIC = """あなたは、テキストデータを分析する�
 (分析結果から導かれる考察や示唆を記述する。また、データから見られる潜在的な課題や、さらなる分析の方向性についても言及する)
 """
 
-# 3. クラスター分析用プロンプト (固定)
-SYSTEM_PROMPT_CLUSTER = """あなたは、高度なテキストクラスタリング（トピックモデリング）専門のアナリストです。
-与えられたテキスト群を分析し、主要な「言説クラスター（意見のグループ）」を特定・分類してください。
-データは `[行番号: XX] [属性...] || テキスト` の形式で提供されます。
+# 3. クラスター分析 (JSON生成用) のシステムプロンプト
+# (これは `call_gemini_api` の `system_instruction` で使用)
+SYSTEM_PROMPT_CLUSTER_JSON = """あなたは高度なテキストクラスタリング専門のアナリストです。提供されたテキストデータを分析し、主要な言説クラスター（3〜5個）と、それらを構成するサブトピック（各クラスター内で3〜5個）に分類してください。
 {analysis_scope_instruction}
 
-以下のタスクを実行し、結果をマークダウン形式で出力してください。
+[タスク]
+1. テキスト全体を読み、主要なテーマ（クラスター）を3〜5個特定します。
+2. 各クラスターが、分析対象データ全体（{analyzed_items}件）の中で占めるおおよその割合（%）を計算します。
+3. 各クラスターを構成する、より詳細なサブトピックを3〜5個特定します。
+4. 各サブトピックが、分析対象データ**全体**（{analyzed_items}件）の中で占めるおおよその割合（%）を計算します。
+5. `name` フィールドには `[トピック名] (XX.X%)` の形式で割合を含めてください。
+6. `value` フィールドには、サブトピックの割合（パーセンテージの数値のみ）を設定してください。
+7. **重要**: サブトピックの `value` の合計が、親クラスターの割合と一致する必要は**ありません**。（クラスターは重複を許容するため）
+8. **重要**: 出力は、指定されたJSONスキーマに厳密に従ってください。
 
-1.  全てのテキストデータを読み込み、内容が類似する意見のグループ（クラスター）に分類してください。
-2.  主要なクラスターを3〜5個特定してください。
-3.  各主要クラスターについて、以下の形式で詳細に出力してください:
+[例]
+- クラスターA (30.0%)
+  - サブトピックA1 (15.0%)
+  - サブトピックA2 (10.0%)
+  - サブトピックA3 (5.0%)
+"""
 
----
-## クラスターA: [クラスターの要約タイトル]
-**(分析対象データに占めるおおよその割合: XX.X%)**
+# 4. クラスター分析 (テキスト解釈用) のシステムプロンプト
+SYSTEM_PROMPT_CLUSTER_TEXT = """あなたはテキストアナリストです。以下のJSONは、テキストデータをクラスター分析した結果です。
+{analysis_scope_instruction}
 
-* **このクラスターの概要:**
-    (クラスター全体を説明する簡潔な文章をここに記述)
+[分析結果JSON]
+{json_data}
 
-* **構成サブトピック:**
-    * サブトピック1 (例: [具体的な意見やテーマ])
-    * サブトピック2 (例: [具体的な意見やテーマ])
-    * (必要に応じて追加)
-
-* **代表的な意見（引用）:**
-    * "[行番号: XX] ... [引用文] ..."
-    * "[行番号: YY] ... [引用文] ..."
----
-(クラスターB、Cと続ける)
+[あなたのタスク]
+このJSONデータを解釈し、各主要クラスター（`children`の第一階層）がどのような意見グループなのかを、**概要テキスト**としてマークダウン形式で分かりやすく説明してください。
+サブトピック（`children`の第二階層）にも触れながら、なぜそのように分類されたのかを具体的に考察してください。
 """
 
 
-# 4. 会話用プロンプト (可変)
+# 5. 会話用プロンプト (可変)
 SYSTEM_PROMPT_CHAT = """あなたは、与えられたテキストデータ（コンテキスト）に関する質問に答える、優秀なデータアナリストです。
 コンテキストは `[行番号: XX] [属性...] || テキスト` の形式で提供されます。
 ユーザーからの質問に対し、提供されたコンテキスト情報に基づいて、簡潔かつ的確に回答してください。
 コンテキストに含まれていない情報については、その旨を正直に伝えてください。
 """
 
-def call_gemini_api(contents, system_instruction=None):
+# --- ▼ 修正点: `generation_config` を引数で受け取れるように変更 ---
+def call_gemini_api(contents, system_instruction=None, generation_config=None):
     try: apiKey = st.secrets["GEMINI_API_KEY"]
     except Exception: return "AI分析エラー: Streamlit CloudのSecretsに `GEMINI_API_KEY` が設定されていません。"
     if not apiKey: return "AI分析エラー: Streamlit CloudのSecretsに `GEMINI_API_KEY` が設定されていません。"
 
-    # --- ▼ 修正点: URLのタイプミス (httpss -> https) を修正 ---
     apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={apiKey}"
-    # --- ▲ 修正完了 ▲ ---
 
     payload = {"contents": contents}
     if system_instruction:
         payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+    
+    # generation_config があればペイロードに追加
+    if generation_config:
+        payload["generationConfig"] = generation_config
+    # --- ▲ 修正完了 ▲ ---
 
     try:
         response = None; delay = 1000
@@ -179,7 +187,6 @@ def generate_kwic_html(df, text_column, keyword, max_results=100):
         for match in kwic_pattern.finditer(text):
             if len(results) >= max_results: break
             left, center, right = match.groups()
-            # HTMLエスケープはstreamlit.components.v1.htmlが自動で行うため不要
             html_row = f'<div style="margin-bottom: 10px; padding: 5px; border-bottom: 1px solid #eee; font-family: sans-serif;"><span style="text-align: right; display: inline-block; width: 45%; color: #555; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">...{left}</span><span style="background-color: yellow; font-weight: bold; padding: 2px 0;">{center}</span><span style="text-align: left; display: inline-block; width: 45%; color: #555; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{right}...</span></div>'
             results.append(html_row)
         if len(results) >= max_results: break
@@ -212,6 +219,148 @@ def calculate_characteristic_words(_df, attribute_col, text_col, _stopwords_set)
             except ValueError: continue
         characteristic_words.sort(key=lambda x: x[1]); results[attr_value] = characteristic_words[:20]
     return results
+
+# --- ▼ 修正点: D3.js サンバースト図を描画するHTMLを生成する関数 ---
+def create_sunburst_html(json_data_str):
+    # D3.js (v7) を使用
+    html_template = f"""
+    <!DOCTYPE html>
+    <html lang="ja">
+    <head>
+        <meta charset="UTF-8">
+        <title>Sunburst Chart</title>
+        <script src="https://d3js.org/d3.v7.min.js"></script>
+        <style>
+            body {{
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                margin: 0;
+                padding: 0;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                width: 100%;
+                height: 600px;
+                overflow: hidden;
+            }}
+            #chart {{
+                width: 100%;
+                height: 550px;
+                position: relative;
+            }}
+            #tooltip {{
+                position: absolute;
+                background-color: #333;
+                color: #fff;
+                padding: 8px 12px;
+                border-radius: 4px;
+                font-size: 14px;
+                pointer-events: none;
+                opacity: 0;
+                transition: opacity 0.2s;
+                white-space: nowrap;
+            }}
+            svg {{
+                display: block;
+                margin: auto;
+            }}
+            path {{
+                cursor: pointer;
+            }}
+            path:hover {{
+                opacity: 0.8;
+            }}
+            text {{
+                font-size: 12px;
+                pointer-events: none;
+                fill: #333;
+            }}
+        </style>
+    </head>
+    <body>
+        <div id="chart"></div>
+        <div id="tooltip"></div>
+
+        <script>
+            // 1. データと設定
+            const data = {json.dumps(json.loads(json_data_str))}; // PythonからJSON文字列を埋め込む
+            const width = Math.min(window.innerWidth, 800); // チャートの幅
+            const height = 550; // チャートの高さ
+            const radius = Math.min(width, height) / 2 - 10;
+            const color = d3.scaleOrdinal(d3.schemeCategory10);
+
+            // 2. SVGコンテナの作成
+            const svg = d3.select("#chart").append("svg")
+                .attr("width", width)
+                .attr("height", height)
+                .append("g")
+                .attr("transform", `translate(${width / 2}, ${height / 2})`);
+
+            // 3. 階層データ構造の作成
+            const root = d3.hierarchy(data)
+                .sum(d => d.value) // valueを使ってサイズを計算
+                .sort((a, b) => b.value - a.value);
+
+            // 4. パーティションレイアウトの作成
+            const partition = d3.partition()
+                .size([2 * Math.PI, radius]);
+
+            partition(root);
+
+            // 5. Arcジェネレータの作成
+            const arc = d3.arc()
+                .startAngle(d => d.x0)
+                .endAngle(d => d.x1)
+                .innerRadius(d => d.y0)
+                .outerRadius(d => d.y1);
+
+            // 6. ツールチップの選択
+            const tooltip = d3.select("#tooltip");
+
+            // 7. パス（扇形）の描画
+            svg.selectAll("path")
+                .data(root.descendants().filter(d => d.depth)) // ルートノード(depth=0)は描画しない
+                .enter().append("path")
+                .attr("d", arc)
+                .style("fill", d => color((d.children ? d : d.parent).data.name))
+                .style("stroke", "#fff")
+                .style("stroke-width", "0.5px")
+                .on("mouseover", (event, d) => {
+                    tooltip.transition().duration(200).style("opacity", .9);
+                    let percent = (d.value / root.value * 100).toFixed(1);
+                    tooltip.html(`<b>${d.data.name}</b><br>全体に占める割合: ${percent}%`)
+                        .style("left", (event.pageX + 15) + "px")
+                        .style("top", (event.pageY - 28) + "px");
+                })
+                .on("mouseout", () => {
+                    tooltip.transition().duration(500).style("opacity", 0);
+                });
+
+            // 8. ラベルの追加 (オプション: 読みやすさのために調整が必要)
+             svg.selectAll("text")
+                .data(root.descendants().filter(d => d.depth && (d.y0 + d.y1) / 2 * (d.x1 - d.x0) > 10))
+                .enter().append("text")
+                .attr("transform", d => {
+                    const x = (d.x0 + d.x1) / 2 * 180 / Math.PI;
+                    const y = (d.y0 + d.y1) / 2;
+                    return `rotate(${x - 90}) translate(${y},0) rotate(${x < 180 ? 0 : 180})`;
+                })
+                .attr("dy", "0.35em")
+                .attr("text-anchor", "middle")
+                .style("fill", d => d.depth > 1 ? "#444" : "#000") // サブトピックの文字色を少し薄く
+                .text(d => {
+                     // 長すぎるラベルは省略
+                     const name = d.data.name;
+                     return name.length > 20 ? name.substring(0, 20) + "..." : name;
+                });
+
+        </script>
+    </body>
+    </html>
+    """
+    return html_template
+# --- ▲ 修正完了 ▲ ---
+
 
 # --- 7. WordCloud生成関数 ---
 def generate_wordcloud(_words_list, font_path, _stopwords_set):
@@ -270,7 +419,9 @@ def generate_html_report():
     html_parts.append("<style>body{font-family:sans-serif;margin:20px}h1,h2,h3{color:#333;border-bottom:1px solid #ccc;padding-bottom:5px}h2{margin-top:30px}.result-section{margin-bottom:30px;padding:15px;border:1px solid #eee;border-radius:5px;background-color:#f9f9f9}img{max-width:100%;height:auto;border:1px solid #ddd;margin-top:10px}table{border-collapse:collapse;width:100%;margin-top:10px}th,td{border:1px solid #ddd;padding:8px;text-align:left}th{background-color:#f2f2f2}pre{background-color:#eee;padding:10px;border-radius:3px;white-space:pre-wrap;word-wrap:break-word}</style>")
     html_parts.append("</head><body><h1>テキスト分析レポート</h1>")
     if 'ai_result_simple' in st.session_state: html_parts.append(f"<div class='result-section'><h2>🤖 AI サマリー (簡易)</h2><pre>{st.session_state.ai_result_simple}</pre></div>")
-    if 'ai_result_cluster' in st.session_state: html_parts.append(f"<div class='result-section'><h2>📊 AI クラスター分析</h2><pre>{st.session_state.ai_result_cluster}</pre></div>")
+    # --- ▼ 修正点: HTMLレポートにはJSONではなく、テキスト解釈のみ含める ---
+    if 'ai_result_cluster_text' in st.session_state: html_parts.append(f"<div class='result-section'><h2>📊 AI クラスター分析 (解釈)</h2><pre>{st.session_state.ai_result_cluster_text}</pre></div>")
+    # --- ▲ 修正完了 ▲ ---
     if 'fig_wc_display' in st.session_state and st.session_state.fig_wc_display:
         img_base64 = fig_to_base64_png(st.session_state.fig_wc_display);
         if img_base64: html_parts.append(f"<div class='result-section'><h2>☁️ WordCloud (全体)</h2><img src='{img_base64}' alt='WordCloud Overall'></div>")
@@ -337,7 +488,10 @@ if uploaded_file:
                         st.session_state.attribute_columns = attribute_columns
                         
                         st.session_state.pop('ai_result_simple', None); st.session_state.pop('ai_result_academic', None)
-                        st.session_state.pop('ai_result_cluster', None) # クラスター分析もクリア
+                        # --- ▼ 修正点: クラスター分析のキャッシュもクリア ---
+                        st.session_state.pop('ai_result_cluster_json', None)
+                        st.session_state.pop('ai_result_cluster_text', None)
+                        # --- ▲ 修正完了 ▲ ---
                         st.session_state.pop('fig_wc_display', None); st.session_state.pop('wc_error_display', None)
                         st.session_state.pop('fig_net_display', None); st.session_state.pop('net_error_display', None)
                         st.session_state.pop('chi2_results_display', None); st.session_state.pop('chi2_error_display', None)
@@ -383,17 +537,13 @@ if uploaded_file:
             # --- (共通) AIに渡すテキストと件数を生成するロジック ---
             
             def format_for_ai(row):
-                # row.name は 0-based index。Excelの行番号 (1-based header) に合わせるため +2
                 excel_row_num = row.name + 2 
                 text = row[text_column] or ''; 
                 attrs = [str(row[col] or 'N/A') for col in attribute_columns]
-                
                 id_str = f"[行番号: {excel_row_num}]"
                 attr_str = f"[{' | '.join(attrs)}]" if attrs else ""
-                
                 return f"{id_str} {attr_str} || {text}"
 
-            # AIに渡すテキストと、実際に渡した件数を正確に把握する
             total_items = len(df_analyzed)
             ai_input_parts = []
             current_char_count = 0
@@ -409,7 +559,6 @@ if uploaded_file:
             
             ai_input_text = "".join(ai_input_parts)
             
-            # AIに渡す「分析スコープ」の指示を生成
             if analyzed_items < total_items:
                 analysis_scope_instr = f"【重要】全 {total_items:,} 件中、先頭の {analyzed_items:,} 件のデータが提供されています。分析や件数・割合の計算は、この {analyzed_items:,} 件のデータを「全体」として行ってください。"
                 analysis_scope_warning = f"データが非常に大きいため、AI分析は先頭の {analyzed_items:,} 件（全 {total_items:,} 件中）を対象に実行されました。全件の厳密な統計は他のタブをご覧ください。"
@@ -440,22 +589,104 @@ if uploaded_file:
                         st.session_state.ai_result_simple = call_gemini_api(contents, system_instruction=system_instr_s)
                 st.markdown(st.session_state.ai_result_simple)
 
-            # --- (新設) AI クラスター分析タブ ---
+            # --- ▼ 修正点: (新設) AI クラスター分析タブ (JSON + D3.js) ---
             with tab_cluster:
-                st.subheader("AIによる言説クラスター分析")
-                if 'ai_result_cluster' not in st.session_state:
-                    with st.spinner("AIによるクラスター分析を実行中..."):
-                        
+                st.subheader("AIによる言説クラスター分析 (Sunburst)")
+                st.info("AIがテキストを階層的なトピックに分類し、その構成比を可視化します。円グラフはマウスオーバーやクリックで操作できます。")
+
+                # 1. JSONデータの生成 (キャッシュ確認)
+                if 'ai_result_cluster_json' not in st.session_state:
+                    with st.spinner("AIによるクラスターJSONを生成中... (ステップ1/2)"):
                         if analyzed_items < total_items: st.warning(analysis_scope_warning, icon="⚠️")
                         else: st.info(analysis_scope_warning, icon="✅")
 
-                        contents = [{"parts": [{"text": ai_input_text}]}]
+                        contents_json = [{"parts": [{"text": ai_input_text}]}]
+                        # D3.jsの階層データ (sunburst) に合わせたスキーマ
+                        schema = {
+                            "type": "OBJECT",
+                            "properties": {
+                                "name": {"type": "STRING", "description": "常に '全体' または 'All Topics'"},
+                                "children": {
+                                    "type": "ARRAY",
+                                    "description": "主要なクラスター（3〜5個）の配列",
+                                    "items": {
+                                        "type": "OBJECT",
+                                        "properties": {
+                                            "name": {"type": "STRING", "description": "クラスター名 (例: 'ポジティブな意見 (30.0%)')"},
+                                            "children": {
+                                                "type": "ARRAY",
+                                                "description": "サブトピック（3〜5個）の配列",
+                                                "items": {
+                                                    "type": "OBJECT",
+                                                    "properties": {
+                                                        "name": {"type": "STRING", "description": "サブトピック名 (例: 'デザインへの言及 (15.0%)')"},
+                                                        "value": {"type": "NUMBER", "description": "サブトピックの割合（数値のみ）"}
+                                                    },
+                                                    "required": ["name", "value"]
+                                                }
+                                            }
+                                        },
+                                        "required": ["name", "children"]
+                                    }
+                                }
+                            },
+                            "required": ["name", "children"]
+                        }
                         
-                        system_instr_c = SYSTEM_PROMPT_CLUSTER.format(
-                            analysis_scope_instruction=analysis_scope_instr
+                        gen_config_json = {
+                            "response_mime_type": "application/json",
+                            "response_schema": schema
+                        }
+                        
+                        system_instr_json = SYSTEM_PROMPT_CLUSTER_JSON.format(
+                            analysis_scope_instruction=analysis_scope_instr,
+                            analyzed_items=analyzed_items
                         )
-                        st.session_state.ai_result_cluster = call_gemini_api(contents, system_instruction=system_instr_c)
-                st.markdown(st.session_state.ai_result_cluster)
+                        
+                        json_str = call_gemini_api(contents_json, system_instruction=system_instr_json, generation_config=gen_config_json)
+                        st.session_state.ai_result_cluster_json = json_str
+
+                # 2. テキスト解釈の生成 (キャッシュ確認)
+                if 'ai_result_cluster_text' not in st.session_state and 'ai_result_cluster_json' in st.session_state:
+                     with st.spinner("AIによるクラスターの解釈を生成中... (ステップ2/2)"):
+                        json_str = st.session_state.ai_result_cluster_json
+                        
+                        system_instr_text = SYSTEM_PROMPT_CLUSTER_TEXT.format(
+                            analysis_scope_instruction=analysis_scope_instr,
+                            json_data=json_str
+                        )
+                        contents_text = [{"parts": [{"text": "このクラスター分析の結果を、マークダウン形式で詳細に解釈・要約してください。"}]}]
+                        
+                        text_summary = call_gemini_api(contents_text, system_instruction=system_instr_text)
+                        st.session_state.ai_result_cluster_text = text_summary
+
+                # 3. D3.jsによる描画とテキスト表示
+                if 'ai_result_cluster_json' in st.session_state:
+                    json_data_str = st.session_state.ai_result_cluster_json
+                    try:
+                        # JSONが有効かどうかの簡易チェック
+                        json.loads(json_data_str) 
+                        
+                        st.subheader("トピック構成 (Sunburst)")
+                        sunburst_html_content = create_sunburst_html(json_data_str)
+                        html(sunburst_html_content, height=600, scrolling=False)
+                        
+                        # テキスト解釈を表示
+                        if 'ai_result_cluster_text' in st.session_state:
+                            st.subheader("AIによるクラスターの解釈")
+                            st.markdown(st.session_state.ai_result_cluster_text)
+                        else:
+                            st.info("クラスターの解釈を生成中です...")
+                            
+                    except json.JSONDecodeError:
+                        st.error("AIによるJSON生成に失敗しました。AIが有効なJSONを返せませんでした。")
+                        st.text_area("AIの生レスポンス (エラー)", json_data_str, height=200)
+                    except Exception as e:
+                        st.error(f"Sunburstチャートの描画エラー: {e}")
+                        st.text_area("AIのJSONレスポンス", json_data_str, height=200)
+                else:
+                    st.info("クラスター分析データを生成中です...")
+            # --- ▲ 修正完了 ▲ ---
             
             # --- Tab 2: WordCloud --- (tab2 に変更)
             with tab2:
