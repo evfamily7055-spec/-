@@ -216,10 +216,11 @@ def calculate_characteristic_words(_df, attribute_col, text_col, _stopwords_set)
         characteristic_words.sort(key=lambda x: x[1]); results[attr_value] = characteristic_words[:20]
     return results
 
-# --- D3.js サンバースト図を描画するHTMLを生成する関数 ---
+# --- ▼ 修正点: f-string をやめ、.format() を使用するように変更 ---
 def create_sunburst_html(json_data_str):
     # D3.js (v7) を使用
-    html_template = f"""
+    # f-string (f"") ではなく、通常の文字列 (""") に変更
+    html_template = """ 
     <!DOCTYPE html>
     <html lang="ja">
     <head>
@@ -279,7 +280,7 @@ def create_sunburst_html(json_data_str):
 
         <script>
             // 1. データと設定
-            const data = {json.dumps(json.loads(json_data_str))}; // PythonからJSON文字列を埋め込む
+            const data = {json_data_placeholder}; // .format() で置換されるプレースホルダー
             const width = Math.min(window.innerWidth, 800); // チャートの幅
             const height = 550; // チャートの高さ
             const radius = Math.min(width, height) / 2 - 10;
@@ -290,7 +291,7 @@ def create_sunburst_html(json_data_str):
                 .attr("width", width)
                 .attr("height", height)
                 .append("g")
-                .attr("transform", `translate(${{width / 2}}, ${{height / 2}})`); // F-STRING FIX: { -> {{
+                .attr("transform", `translate(${width / 2}, ${height / 2})`); // JSの${}はそのまま
 
             // 3. 階層データ構造の作成
             const root = d3.hierarchy(data)
@@ -321,41 +322,42 @@ def create_sunburst_html(json_data_str):
                 .style("fill", d => color((d.children ? d : d.parent).data.name))
                 .style("stroke", "#fff")
                 .style("stroke-width", "0.5px")
-                .on("mouseover", (event, d) => {{ // F-STRING FIX: { -> {{
+                .on("mouseover", (event, d) => {{
                     tooltip.transition().duration(200).style("opacity", .9);
                     let percent = (d.value / root.value * 100).toFixed(1);
-                    // --- ▼ 修正点: ${percent} も {{percent}} にエスケープ ---
-                    tooltip.html(`<b>${{d.data.name}}</b><br>全体に占める割合: ${{percent}}%`)
+                    tooltip.html(`<b>${d.data.name}</b><br>全体に占める割合: ${percent}%`) // JSの${}はそのまま
                         .style("left", (event.pageX + 15) + "px")
                         .style("top", (event.pageY - 28) + "px");
-                }}) // F-STRING FIX: } -> }}
-                .on("mouseout", () => {{ // F-STRING FIX: { -> {{
+                }})
+                .on("mouseout", () => {{
                     tooltip.transition().duration(500).style("opacity", 0);
-                }}); // F-STRING FIX: } -> }}
+                }});
 
             // 8. ラベルの追加 (オプション: 読みやすさのために調整が必要)
              svg.selectAll("text")
                 .data(root.descendants().filter(d => d.depth && (d.y0 + d.y1) / 2 * (d.x1 - d.x0) > 10))
                 .enter().append("text")
-                .attr("transform", d => {{ // F-STRING FIX: { -> {{
+                .attr("transform", d => {{
                     const x = (d.x0 + d.x1) / 2 * 180 / Math.PI;
                     const y = (d.y0 + d.y1) / 2;
-                    return `rotate(${{x - 90}}) translate(${{y}},0) rotate(${{x < 180 ? 0 : 180}})`; // F-STRING FIX: ${} -> ${{}}
-                }}) // F-STRING FIX: } -> }}
+                    return `rotate(${x - 90}) translate(${y},0) rotate(${x < 180 ? 0 : 180})`; // JSの${}はそのまま
+                }})
                 .attr("dy", "0.35em")
                 .attr("text-anchor", "middle")
                 .style("fill", d => d.depth > 1 ? "#444" : "#000") // サブトピックの文字色を少し薄く
-                .text(d => {{ // F-STRING FIX: { -> {{
+                .text(d => {{
                      // 長すぎるラベルは省略
                      const name = d.data.name;
                      return name.length > 20 ? name.substring(0, 20) + "..." : name;
-                }}); // F-STRING FIX: } -> }}
+                }});
 
         </script>
     </body>
     </html>
     """
-    return html_template
+    
+    # .format() を使って安全にJSONデータを挿入
+    return html_template.format(json_data_placeholder=json.dumps(json.loads(json_data_str)))
 # --- ▲ 修正完了 ▲ ---
 
 
