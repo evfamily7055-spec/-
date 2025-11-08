@@ -216,10 +216,11 @@ def calculate_characteristic_words(_df, attribute_col, text_col, _stopwords_set)
         characteristic_words.sort(key=lambda x: x[1]); results[attr_value] = characteristic_words[:20]
     return results
 
-# --- ▼ 修正点: f-string をやめ、.format() を使用するように変更 ---
+# --- ▼ 修正点: f-string をやめ、.replace() を使用するように変更 ---
 def create_sunburst_html(json_data_str):
     # D3.js (v7) を使用
     # f-string (f"") ではなく、通常の文字列 (""") に変更
+    # Pythonの変数を埋め込む箇所を `__JSON_DATA_PLACEHOLDER__` に変更
     html_template = """ 
     <!DOCTYPE html>
     <html lang="ja">
@@ -228,7 +229,7 @@ def create_sunburst_html(json_data_str):
         <title>Sunburst Chart</title>
         <script src="https://d3js.org/d3.v7.min.js"></script>
         <style>
-            body {{
+            body {
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
                 margin: 0;
                 padding: 0;
@@ -239,13 +240,13 @@ def create_sunburst_html(json_data_str):
                 width: 100%;
                 height: 600px;
                 overflow: hidden;
-            }}
-            #chart {{
+            }
+            #chart {
                 width: 100%;
                 height: 550px;
                 position: relative;
-            }}
-            #tooltip {{
+            }
+            #tooltip {
                 position: absolute;
                 background-color: #333;
                 color: #fff;
@@ -256,22 +257,22 @@ def create_sunburst_html(json_data_str):
                 opacity: 0;
                 transition: opacity 0.2s;
                 white-space: nowrap;
-            }}
-            svg {{
+            }
+            svg {
                 display: block;
                 margin: auto;
-            }}
-            path {{
+            }
+            path {
                 cursor: pointer;
-            }}
-            path:hover {{
+            }
+            path:hover {
                 opacity: 0.8;
-            }}
-            text {{
+            }
+            text {
                 font-size: 12px;
                 pointer-events: none;
                 fill: #333;
-            }}
+            }
         </style>
     </head>
     <body>
@@ -280,7 +281,7 @@ def create_sunburst_html(json_data_str):
 
         <script>
             // 1. データと設定
-            const data = {json_data_placeholder}; // .format() で置換されるプレースホルダー
+            const data = __JSON_DATA_PLACEHOLDER__; // .replace() で置換されるプレースホルダー
             const width = Math.min(window.innerWidth, 800); // チャートの幅
             const height = 550; // チャートの高さ
             const radius = Math.min(width, height) / 2 - 10;
@@ -322,42 +323,50 @@ def create_sunburst_html(json_data_str):
                 .style("fill", d => color((d.children ? d : d.parent).data.name))
                 .style("stroke", "#fff")
                 .style("stroke-width", "0.5px")
-                .on("mouseover", (event, d) => {{
+                .on("mouseover", (event, d) => {
                     tooltip.transition().duration(200).style("opacity", .9);
                     let percent = (d.value / root.value * 100).toFixed(1);
                     tooltip.html(`<b>${d.data.name}</b><br>全体に占める割合: ${percent}%`) // JSの${}はそのまま
                         .style("left", (event.pageX + 15) + "px")
                         .style("top", (event.pageY - 28) + "px");
-                }})
-                .on("mouseout", () => {{
+                })
+                .on("mouseout", () => {
                     tooltip.transition().duration(500).style("opacity", 0);
-                }});
+                });
 
             // 8. ラベルの追加 (オプション: 読みやすさのために調整が必要)
              svg.selectAll("text")
                 .data(root.descendants().filter(d => d.depth && (d.y0 + d.y1) / 2 * (d.x1 - d.x0) > 10))
                 .enter().append("text")
-                .attr("transform", d => {{
+                .attr("transform", d => {
                     const x = (d.x0 + d.x1) / 2 * 180 / Math.PI;
                     const y = (d.y0 + d.y1) / 2;
                     return `rotate(${x - 90}) translate(${y},0) rotate(${x < 180 ? 0 : 180})`; // JSの${}はそのまま
-                }})
+                })
                 .attr("dy", "0.35em")
                 .attr("text-anchor", "middle")
                 .style("fill", d => d.depth > 1 ? "#444" : "#000") // サブトピックの文字色を少し薄く
-                .text(d => {{
+                .text(d => {
                      // 長すぎるラベルは省略
                      const name = d.data.name;
                      return name.length > 20 ? name.substring(0, 20) + "..." : name;
-                }});
+                });
 
         </script>
     </body>
     </html>
     """
     
-    # .format() を使って安全にJSONデータを挿入
-    return html_template.format(json_data_placeholder=json.dumps(json.loads(json_data_str)))
+    # .replace() を使って安全にJSONデータを挿入
+    # AIが生成したJSON文字列 (json_data_str) を一度パース(loads)し、再度シリアライズ(dumps)することで、
+    # JSON文字列内のエスケープ文字(\" や \n)が正しく処理され、JavaScriptエラーを防ぐ。
+    try:
+        json_payload = json.dumps(json.loads(json_data_str))
+    except json.JSONDecodeError:
+        # AIが不正なJSONを返した場合、JSエラーを防ぐため空のデータを渡す
+        json_payload = '{"name": "JSONエラー", "children": []}'
+        
+    return html_template.replace("__JSON_DATA_PLACEHOLDER__", json_payload)
 # --- ▲ 修正完了 ▲ ---
 
 
@@ -658,6 +667,7 @@ if uploaded_file:
                 if 'ai_result_cluster_json' in st.session_state:
                     json_data_str = st.session_state.ai_result_cluster_json
                     try:
+                        # JSONが有効かどうかの簡易チェック
                         json.loads(json_data_str) 
                         
                         st.subheader("トピック構成 (Sunburst)")
