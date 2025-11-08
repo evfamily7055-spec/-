@@ -14,7 +14,7 @@ import japanize_matplotlib # Matplotlibの日本語化
 import numpy as np # --- 統計計算のために追加 ---
 from scipy.stats import chi2_contingency # --- カイ二乗検定のために追加 ---
 import io # --- 画像ダウンロード機能のために追加 ---
-import base64 # --- HTMLレポートの画像埋め込みのために追加 ---
+import base64 # --- HTMLレポートの画像埋込みのために追加 ---
 from streamlit.components.v1 import html # --- KWIC表示用のhtmlコンポーネント ---
 
 # --- 1. アプリの基本設定 ---
@@ -34,6 +34,11 @@ BASE_STOPWORDS = set([
     '行う', '言う', '申し上げる', 'まいる', '見る', 'ここ', 'そこ', 'あそこ', 'こちら', 'そちら', 'あちら', 'この', 'その', 'あの'
 ])
 
+# --- ▼ 修正点: AI分析の最大文字数制限を定義 ---
+# APIの安定性を考慮し、AIに送信するテキストの最大文字数を設定（約100万文字）
+MAX_AI_INPUT_CHARS = 1000000
+# --- ▲ 修正完了 ▲ ---
+
 @st.cache_data # テキストとTokenizerに変化がなければキャッシュ
 def extract_words(text, _tokenizer): # _tokenizer引数はキャッシュのキーとして使う
     if not isinstance(text, str):
@@ -47,28 +52,33 @@ def extract_words(text, _tokenizer): # _tokenizer引数はキャッシュのキ�
         part_of_speech = token.part_of_speech.split(',')[0]
         if part_of_speech in ['名詞', '動詞', '形容詞']:
             if len(token.base_form) > 1: # 文字数チェックのみ行う
-                 words.append(token.base_form)
+                words.append(token.base_form)
     return words
 
 # --- 3. Gemini AI 分析関数 (会話対応版) ---
 
 # 1. シンプルな要約プロンプト (固定)
+# --- ▼ 修正点: AIへの指示に「件数」を含めるよう変更 ---
 SYSTEM_PROMPT_SIMPLE = """あなたは、テキストマイニングの専門家です。与えられたテキスト群を分析し、結果を詳細かつ分かりやすくマークダウン形式で出力してください。
 {attributeInstruction}
 ## 1. 分析サマリー
 (全体の傾向を簡潔に要約)
 ## 2. 主要なテーマ
-(頻出するトピックや意見のカテゴリを3〜5個提示)
+(頻出するトピックや意見のカテゴリを3〜5個提示してください。**可能であれば、それぞれのテーマがおおよそ何件の意見に基づいているか（件数や割合）にも言及してください**。)
 ## 3. ポジティブな意見
 (具体的な良い点を引用しつつリストアップ)
 ## 4. ネガティブな意見・課題
 (具体的な不満や改善点を引用しつつリストアップ)
+## 5. 少数だが注目すべき意見
+(**件数は少ない（例: 1〜2件）かもしれないが、非常に重要、ユニーク、または示唆に富む意見があれば、ここに抽出してください**。)
 {has_attribute}
-## 6. 総評とネクストアクション
+## 7. 総評とネクストアクション
 (分析から言えること、次に行うべきアクションを提案)
 """
+# --- ▲ 修正完了 ▲ ---
 
 # 2. 学術論文用プロンプト (固定)
+# --- ▼ 修正点: AIへの指示に「件数」を含めるよう変更 ---
 SYSTEM_PROMPT_ACADEMIC = """あなたは、テキストデータを分析する計量テキスト分析（テキストマイニング）の専門家です。
 与えられたテキスト群を分析し、その結果を学術論文の「結果」および「考察」セクションに記述するのに適した、客観的かつフォーマルな文体で出力してください。
 {attributeInstruction}
@@ -78,11 +88,16 @@ SYSTEM_PROMPT_ACADEMIC = """あなたは、テキストデータを分析する�
 (データ全体の主要な傾向や特筆すべき点を、客観的な要約として2〜3文で記述する)
 
 ## 2. 主要な知見 (Key Findings)
-(データから抽出された主要なテーマやトピック、頻出する意見のカテゴリを3〜5点、箇条書きで提示する。可能であれば、具体的なテキスト断片を「」で引用し、所見を補強する)
+(データから抽出された主要なテーマやトピック、頻出する意見のカテゴリを3〜5点、箇条書きで提示する。**可能であれば、それぞれのテーマがおおよそ何件の意見に基づいているか（件数や割合）にも言及し**、具体的なテキスト断片を「」で引用して所見を補強する)
+
+## 3. その他の注目すべき所見 (Other Notable Findings)
+(**頻度は低い（例: 1〜2件）ものの、分析上見過ごすべきではない特異な意見、または将来の課題を示唆するような意見があれば、ここに記述する**)
 {has_attribute}
-## 4. 考察と今後の課題 (Discussion and Limitations)
+## 5. 考察と今後の課題 (Discussion and Limitations)
 (分析結果から導かれる考察や示唆を記述する。また、データから見られる潜在的な課題や、さらなる分析の方向性についても言及する)
 """
+# --- ▲ 修正完了 ▲ ---
+
 
 # 3. 会話用プロンプト (可変)
 SYSTEM_PROMPT_CHAT = """あなたは、与えられたテキストデータ（コンテキスト）に関する質問に答える、優秀なデータアナリストです。
@@ -263,6 +278,12 @@ if uploaded_file:
             st.header("⚙️ 分析設定")
             text_column = st.selectbox("分析したいテキスト列", all_columns, index=0)
             attribute_columns = st.multiselect("分析軸 (複数OK: 例: 年代, 性別)", all_columns)
+            
+            # --- ▼ 修正点: サンプル件数の指定を削除し、全件分析の注記を追加 ---
+            # st.number_input(...) を削除
+            st.info(f"AI分析は全件（最大{MAX_AI_INPUT_CHARS:,}文字）を対象とします。統計分析は常に全件が対象です。", icon="ℹ️")
+            # --- ▲ 修正完了 ▲ ---
+
             st.markdown("---")
             run_button = st.button("分析を実行", type="primary", use_container_width=True)
             if 'df_analyzed' in st.session_state:
@@ -284,6 +305,11 @@ if uploaded_file:
                         st.session_state.df_analyzed = df_analyzed
                         st.session_state.text_column = text_column
                         st.session_state.attribute_columns = attribute_columns
+                        
+                        # --- ▼ 修正点: ai_sample_size をセッションから削除 ---
+                        # st.session_state.ai_sample_size = ai_sample_size
+                        # --- ▲ 修正完了 ▲ ---
+
                         st.session_state.pop('ai_result_simple', None); st.session_state.pop('ai_result_academic', None)
                         st.session_state.pop('fig_wc_display', None); st.session_state.pop('wc_error_display', None)
                         st.session_state.pop('fig_net_display', None); st.session_state.pop('net_error_display', None)
@@ -331,14 +357,29 @@ if uploaded_file:
                 # (変更なし)
                 if 'ai_result_simple' not in st.session_state:
                     with st.spinner("AIによる要約を生成中..."):
-                        sample_df = df_analyzed.sample(n=min(len(df_analyzed), 100))
+                        
+                        # --- ▼ 修正点: サンプリング(sample)を廃止し、全件取得＋文字数制限に変更 ---
+                        # sample_df = df_analyzed.sample(n=min(len(df_analyzed), 100))
+                        
                         def format_for_ai(row):
                             text = row[text_column] or ''; attrs = [str(row[col] or 'N/A') for col in attribute_columns]
                             return f"[{' | '.join(attrs)}] || {text}" if attrs else text
-                        ai_input_text = "\n".join(sample_df.apply(format_for_ai, axis=1))
+                        
+                        # 全件を対象にする
+                        ai_input_text_full = "\n".join(df_analyzed.apply(format_for_ai, axis=1))
+                        
+                        # 文字数制限をかける
+                        if len(ai_input_text_full) > MAX_AI_INPUT_CHARS:
+                            ai_input_text = ai_input_text_full[:MAX_AI_INPUT_CHARS]
+                            st.warning(f"データが非常に大きいため、AI分析は先頭の約{MAX_AI_INPUT_CHARS:,}文字（全{len(df_analyzed):,}件中）を対象に実行されました。全件の厳密な統計は他のタブをご覧ください。", icon="⚠️")
+                        else:
+                            ai_input_text = ai_input_text_full
+                            st.info(f"AI分析は全{len(df_analyzed):,}件を対象に実行されました。", icon="✅")
+                        # --- ▲ 修正完了 ▲ ---
+
                         contents = [{"parts": [{"text": ai_input_text}]}]
                         has_attr = bool(attribute_columns)
-                        has_attribute_str_s = "## 5. 属性別の傾向 (もしあれば)\n(属性ごとの特徴的な意見を比較)" if has_attr else ""
+                        has_attribute_str_s = "## 6. 属性別の傾向 (もしあれば)\n(属性ごとの特徴的な意見を比較)" if has_attr else ""
                         attr_instr_s = "データは「属性 || テキスト」の形式です。属性ごとの傾向や違いにも着目して分析してください。" if has_attr else ""
                         system_instr_s = SYSTEM_PROMPT_SIMPLE.format(attributeInstruction=attr_instr_s, has_attribute=has_attribute_str_s)
                         st.session_state.ai_result_simple = call_gemini_api(contents, system_instruction=system_instr_s)
@@ -560,23 +601,38 @@ if uploaded_file:
                 st.subheader("AIによる学術論文風サマリー")
                 if 'ai_result_academic' not in st.session_state:
                     with st.spinner("AIによる学術論文風の要約を生成中..."):
-                        sample_df = df_analyzed.sample(n=min(len(df_analyzed), 100))
+
+                        # --- ▼ 修正点: サンプリング(sample)を廃止し、全件取得＋文字数制限に変更 ---
+                        # sample_df = df_analyzed.sample(n=min(len(df_analyzed), 100))
+                        
                         def format_for_ai(row):
-                             text = row[text_column] or ''; attrs = [str(row[col] or 'N/A') for col in attribute_columns]
-                             return f"[{' | '.join(attrs)}] || {text}" if attrs else text
-                        ai_input_text = "\n".join(sample_df.apply(format_for_ai, axis=1))
+                            text = row[text_column] or ''; attrs = [str(row[col] or 'N/A') for col in attribute_columns]
+                            return f"[{' | '.join(attrs)}] || {text}" if attrs else text
+                        
+                        # 全件を対象にする
+                        ai_input_text_full = "\n".join(df_analyzed.apply(format_for_ai, axis=1))
+                        
+                        # 文字数制限をかける
+                        if len(ai_input_text_full) > MAX_AI_INPUT_CHARS:
+                            ai_input_text = ai_input_text_full[:MAX_AI_INPUT_CHARS]
+                            st.warning(f"データが非常に大きいため、AI分析は先頭の約{MAX_AI_INPUT_CHARS:,}文字（全{len(df_analyzed):,}件中）を対象に実行されました。全件の厳密な統計は他のタブをご覧ください。", icon="⚠️")
+                        else:
+                            ai_input_text = ai_input_text_full
+                            st.info(f"AI分析は全{len(df_analyzed):,}件を対象に実行されました。", icon="✅")
+                        # --- ▲ 修正完了 ▲ ---
+                        
                         contents_acad = [{"parts": [{"text": ai_input_text}]}]
                         has_attr_a = bool(attribute_columns)
-                        has_attribute_str_a = "## 3. 属性間の比較分析 (Comparative Analysis)\n(属性（カテゴリ）間で見られた顕著な差異や特徴的な傾向について、具体的に比較・記述する)" if has_attr_a else ""
+                        has_attribute_str_a = "## 4. 属性間の比較分析 (Comparative Analysis)\n(属性（カテゴリ）間で見られた顕著な差異や特徴的な傾向について、具体的に比較・記述する)" if has_attr_a else ""
                         attr_instr_a = "データは「属性 || テキスト」の形式です。属性ごとの傾向や違いにも着目して分析してください。" if has_attr_a else ""
-                        system_instr_a = SYSTEM_PROMPT_ACADEMIC.format(attributeInstruction=attr_instr_a, has_attribute=has_attribute_str_a)
+                        system_instr_s = SYSTEM_PROMPT_ACADEMIC.format(attributeInstruction=attr_instr_a, has_attribute=has_attribute_str_a)
                         st.session_state.ai_result_academic = call_gemini_api(contents_acad, system_instruction=system_instr_a)
                 st.markdown(st.session_state.ai_result_academic)
                 
             # --- ▼ 修正点: AIチャットタブのコードをここに追加 ▼ ---
             with tab8:
                 st.subheader("💬 AI チャット (データ分析)")
-                st.info("分析されたデータ（サンプル）について、AIに質問できます。")
+                st.info("分析されたデータ（全件または最大100万文字）について、AIに質問できます。")
                 if "chat_messages" not in st.session_state: st.session_state.chat_messages = []
                 for message in st.session_state.chat_messages:
                     with st.chat_message(message["role"]): st.markdown(message["content"])
@@ -584,11 +640,25 @@ if uploaded_file:
                     st.session_state.chat_messages.append({"role": "user", "content": prompt})
                     with st.chat_message("user"): st.markdown(prompt)
                     with st.spinner("AIが応答を生成中..."):
-                        sample_df_chat = df_analyzed.sample(n=min(len(df_analyzed), 100))
+                        
+                        # --- ▼ 修正点: サンプリング(sample)を廃止し、全件取得＋文字数制限に変更 ---
+                        # sample_df_chat = df_analyzed.sample(n=min(len(df_analyzed), 100))
+                        
                         def format_for_ai_chat(row):
                             text = row[text_column] or ''; attrs = [str(row[col] or 'N/A') for col in attribute_columns]
                             return f"[{' | '.join(attrs)}] || {text}" if attrs else text
-                        context_text = "\n".join(sample_df_chat.apply(format_for_ai_chat, axis=1))
+                        
+                        # 全件を対象にする
+                        context_text_full = "\n".join(df_analyzed.apply(format_for_ai_chat, axis=1))
+                        
+                        # 文字数制限をかける
+                        if len(context_text_full) > MAX_AI_INPUT_CHARS:
+                            context_text = context_text_full[:MAX_AI_INPUT_CHARS]
+                            st.warning(f"データが非常に大きいため、AIのコンテキスト（参照データ）は先頭の約{MAX_AI_INPUT_CHARS:,}文字分となります。", icon="⚠️")
+                        else:
+                            context_text = context_text_full
+                        # --- ▲ 修正完了 ▲ ---
+
                         api_contents = []
                         # 最初のユーザーターンにコンテキストを追加し、それ以降は単純な会話履歴とする
                         first_user_message = f"""以下のテキストデータ（コンテキスト）について質問があります。\n\n--- コンテキスト ---\n{context_text}\n\n--- 質問 ---\n{prompt}"""
@@ -596,7 +666,7 @@ if uploaded_file:
                         
                         # 既存の履歴を変換
                         for msg in st.session_state.chat_messages[:-1]:
-                             api_contents.append({"role": "user" if msg["role"] == "user" else "model", "parts": [{"text": msg["content"]}]})
+                            api_contents.append({"role": "user" if msg["role"] == "user" else "model", "parts": [{"text": msg["content"]}]})
                         # 新しいユーザーメッセージ（初回ならコンテキスト付き）を追加
                         api_contents.append({"role": "user", "parts": [{"text": first_user_message if is_first_turn else prompt}]})
 
@@ -608,4 +678,3 @@ if uploaded_file:
     except Exception as e:
         st.error(f"ファイルの読み込みまたは分析中にエラーが発生しました: {e}")
         st.exception(e) # 詳細なエラーログを表示
-
