@@ -11,3 +11,5 @@ openpyxl
 streamlit-extras
 scipy
 prince
+numpy
+squarify
