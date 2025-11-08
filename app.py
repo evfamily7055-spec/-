@@ -5,6 +5,7 @@ import requests # Gemini API呼び出し用
 import time # リトライ用
 import json # --- JSONパースのために追加 ---
 import plotly.graph_objects as go # --- ▼ Plotly をインポート ---
+import plotly.express as px # --- ▼ Plotly Express (カラーパレット用) をインポート ---
 from janome.tokenizer import Tokenizer
 from wordcloud import WordCloud
 import networkx as nx 
@@ -58,6 +59,7 @@ def extract_words(text, _tokenizer):
 
 # --- 3. Gemini AI 分析関数 (会話対応版) ---
 
+# --- ▼ 修正点: AI サマリー (表形式) プロンプト ---
 # 1. シンプルな要約プロンプト (固定)
 SYSTEM_PROMPT_SIMPLE = """あなたは、テキストマイニングの専門家です。
 与えられた[分析対象テキスト]と、AIによる[クラスター分析結果JSON]の両方を参照し、分析サマリーをマークダウン形式で出力してください。
@@ -73,7 +75,14 @@ SYSTEM_PROMPT_SIMPLE = """あなたは、テキストマイニングの専門家
 (全体の傾向を簡潔に要約)
 
 ## 2. 主要なテーマ
-(**重要**: このセクションは、**上記[クラスター分析結果JSON]に厳密に従って**記述してください。JSONの `children` (主要クラスター) をリストアップし、その内容（サブトピック）を簡潔に説明してください。)
+(**重要**: このセクションは、**上記[クラスター分析結果JSON]に厳密に従い**、以下の**Markdownテーブル形式**で記述してください。)
+
+| 主要テーマ（クラスター） | 割合 (%) | 概要 (サブトピックを含む) |
+| :--- | :---: | :--- |
+| [クラスターAの名前] | [クラスターAの割合※] | [クラスターAのサブトピックを簡潔にまとめた概要] |
+| [クラスターBの名前] | [クラスターBの割合※] | [クラスターBのサブトピックを簡潔にまとめた概要] |
+| ... | ... | ... |
+※割合は、サブトピックの `value` の合計を % にしたものです。 (例: 15.2)
 
 ## 3. ポジティブな意見
 (与えられた[分析対象テキスト]全体から、具体的な良い点を引用しつつリストアップしてください。**引用する際は、[行番号: XX] も含めてください。**)
@@ -89,6 +98,8 @@ SYSTEM_PROMPT_SIMPLE = """あなたは、テキストマイニングの専門家
 ## 7. 総評とネクストアクション
 (分析から言えること、次に行うべきアクションを提案)
 """
+# --- ▲ 修正完了 ▲ ---
+
 
 # 2. 学術論文用プロンプト (固定)
 SYSTEM_PROMPT_ACADEMIC = """あなたは、テキストデータを分析する計量テキスト分析（テキストマイニング）の専門家です。
@@ -115,29 +126,42 @@ SYSTEM_PROMPT_ACADEMIC = """あなたは、テキストデータを分析する�
 (分析結果から導かれる考察や示唆を記述する。また、データから見られる潜在的な課題や、さらなる分析の方向性についても言及する)
 """
 
+# --- ▼ 修正点: JSONプロンプト (name に割合を含めない) ---
 # 3. クラスター分析 (JSON生成用) のシステムプロンプト
 SYSTEM_PROMPT_CLUSTER_JSON = """あなたは高度なテキストクラスタリング専門のアナリストです。提供されたテキストデータを分析し、主要な言説クラスター（3〜5個）と、それらを構成するサブトピック（各クラスター内で3〜5個）に分類してください。
 {analysis_scope_instruction}
 
 [タスク]
 1. テキスト全体を読み、主要なテーマ（クラスター）を3〜5個特定します。
-2. 各クラスターが、分析対象データ全体（{analyzed_items}件）の中で占めるおおよその割合（%）を計算します。
-3. 各クラスターを構成する、より詳細なサブトピックを3〜5個特定します。
-4. 各サブトピックが、分析対象データ**全体**（{analyzed_items}件）の中で占めるおおよその割合（%）を計算します。
-5. `name` フィールドには `[トピック名] (XX.X%)` の形式で割合を含めてください。
-6. `value` フィールドには、サブトピックの割合（パーセンテージの数値のみ）を設定してください。
-7. **重要**: サブトピックの `value` の合計が、親クラスターの割合と一致する必要は**ありません**。（クラスターは重複を許容するため）
-8. **重要**: 出力は、指定されたJSONスキーマに厳密に従ってください。
+2. 各クラスターを構成する、より詳細なサブトピックを3〜5個特定します。
+3. 各サブトピックが、分析対象データ**全体**（{analyzed_items}件）の中で占めるおおよその割合（%）を計算します。
+4. `name` フィールドには `[トピック名]` のみを入れてください（**割合(%)の文字列は含めないでください**）。
+5. `value` フィールドには、サブトピックの割合（パーセンテージの数値のみ）を設定してください。
+6. **重要**: 出力は、指定されたJSONスキーマに厳密に従ってください。
 
 [例]
-- クラスターA (30.0%)
-  - サブトピックA1 (15.0%)
-  - サブトピックA2 (10.0%)
-  - サブトピックA3 (5.0%)
+{{
+  "name": "全体",
+  "children": [
+    {{
+      "name": "クラスターA",
+      "children": [
+        {{ "name": "サブトピックA1", "value": 15.0 }},
+        {{ "name": "サブトピックA2", "value": 10.0 }}
+      ]
+    }},
+    {{
+      "name": "クラスターB",
+      "children": [
+        {{ "name": "サブトピックB1", "value": 20.0 }}
+      ]
+    }}
+  ]
+}}
 """
+# --- ▲ 修正完了 ▲ ---
 
 # 4. クラスター分析 (テキスト解釈用) のシステムプロンプト
-# --- ▼ 修正点: Plotly に合わせて凡例の指示を修正 ---
 SYSTEM_PROMPT_CLUSTER_TEXT = """あなたはテキストアナリストです。以下のJSONは、テキストデータをクラスター分析した結果です。
 {analysis_scope_instruction}
 
@@ -158,7 +182,6 @@ SYSTEM_PROMPT_CLUSTER_TEXT = """あなたはテキストアナリストです。
 ## AIによるクラスターの解釈
 （次に、各主要クラスターがどのような意見グループなのかを詳細に説明してください。サブトピックにも触れながら、なぜそのように分類されたのかを具体的に考察してください。）
 """
-# --- ▲ 修正完了 ▲ ---
 
 
 # 5. 会話用プロンプト (可変)
@@ -259,9 +282,8 @@ def calculate_characteristic_words(_df, attribute_col, text_col, _stopwords_set)
         characteristic_words.sort(key=lambda x: x[1]); results[attr_value] = characteristic_words[:20]
     return results
 
-# --- ▼ 修正点: Plotly Treemap 用のデータ変換関数 ---
+# --- Plotly Treemap 用のデータ変換関数 ---
 def parse_json_for_plotly(json_data_str):
-    """AIのネストされたJSONを、Plotly Treemap用のリストに変換する"""
     try:
         data = json.loads(json_data_str)
     except Exception as e:
@@ -274,30 +296,26 @@ def parse_json_for_plotly(json_data_str):
     root_name = data.get('name', '全体')
     labels.append(root_name)
     parents.append("")
-    values.append(0) # ルートの値は0 (自動集計される)
-    
-    total_value = 0
+    values.append(0) 
     
     clusters = data.get('children', [])
     if not clusters:
         return None, None, None, "JSONに 'children' (クラスター) が見つかりません。"
 
     for cluster in clusters:
-        cluster_name = cluster.get('name', '不明なクラスター')
+        # AIは割合を含まない名前 (例: "クラスターA") を返す
+        cluster_name = cluster.get('name', '不明なクラスター') 
         labels.append(cluster_name)
         parents.append(root_name)
         
         sub_topics = cluster.get('children', [])
         
         if not sub_topics:
-             # サブトピックがない場合、このクラスター自体を葉ノードとして扱う (value=1)
              values.append(1) 
-             total_value += 1
         else:
-            # サブトピックがある場合、親（クラスター）の value は 0
-            values.append(0)
             cluster_total_value = 0
             for sub_topic in sub_topics:
+                # AIは割合を含まない名前 (例: "サブトピックA1") を返す
                 sub_name = sub_topic.get('name', '不明なトピック')
                 sub_value = sub_topic.get('value', 0)
                 
@@ -307,45 +325,63 @@ def parse_json_for_plotly(json_data_str):
                     values.append(sub_value)
                     cluster_total_value += sub_value
             
-            if cluster_total_value == 0:
-                # サブトピックはあったが、すべてvalue=0だった場合
-                # 親クラスターに最小値1を与えて表示させる
-                values[-1] = 1 # 親クラスターのvalueを1にする
-                total_value += 1
-            else:
-                total_value += cluster_total_value
+            # 親クラスター (深さ1) の value を設定 (0 = 自動集計)
+            values.append(0) 
+
 
     return labels, parents, values, None
-# --- ▲ 修正完了 ▲ ---
 
 
-# --- ▼ 修正点: `Plotly` を使ったTreemap描画関数 ---
+# --- ▼ 修正点: `Plotly` を使ったTreemap描画関数 (ビジュアル改善) ---
 def create_plotly_treemap(json_data_str):
     """
     AIが生成したJSONデータから、Plotlyを使用して
-    インタラクティブなTreemapを生成します。
+    インタラクティブなTreemapを生成します。(ビジュアル改善版)
     """
     labels, parents, values, error = parse_json_for_plotly(json_data_str)
     
     if error:
         return None, error
         
+    root_label = labels[0] # "全体"
+    clusters = [l for l, p in zip(labels, parents) if p == root_label]
+    num_clusters = len(clusters)
+
+    # 柔らかいパステルカラーのパレット "Set3" を使用
+    if num_clusters > 0:
+        colors = px.colors.qualitative.Set3[:num_clusters]
+    else:
+        colors = px.colors.qualitative.Set3
+
     fig = go.Figure(go.Treemap(
         labels = labels,
         parents = parents,
         values = values,
-        textinfo = "label+percent root", # ラベルと全体に対する割合を表示
-        root_color="lightgrey",
-        marker_colorscale='Plotly3', # Set3に近いパステルカラー
-        hoverinfo="label+value+percent root", # ホバー時の情報
-        textfont={"size": 14},
-        pathbar_textfont={'size': 16} # 上部の階層バーの文字サイズ
+        
+        # ▼ 修正点: テキストテンプレートでラベル(太字)と割合(改行)を指定
+        # %{percentRoot} は全体 (root) に対する割合
+        texttemplate="<b>%{label}</b><br>%{percentRoot:.1%}",
+        
+        hoverinfo="label+value+percent root", 
+        
+        # ▼ 修正点: 親(クラスター)ごとに色を割り当て (Set3 パレット)
+        marker_colorscale='Set3',
+        branchvalues="total", # 親の合計が子の合計になるように
+        
+        # ▼ 修正点: テキストの自動調整と重なり防止
+        # 領域に収まるようにフォントサイズを自動調整
+        # 最小サイズを10ptに設定し、それより小さくなる場合はテキストを非表示にする
+        uniformtext=dict(minsize=10, mode='hide'), 
+        
+        pathbar_textfont={'size': 16}
     ))
     
     fig.update_layout(
-        margin = dict(t=50, l=10, r=10, b=10), # タイトル用に上マージンを確保
+        margin = dict(t=50, l=10, r=10, b=10),
         title_text="トピック構成 (Treemap)",
-        title_font_size=20
+        title_font_size=20,
+        # ▼ 修正点: カラーウェイを "Set3" に明示的に指定
+        colorway=px.colors.qualitative.Set3 
     )
     
     return fig, None
@@ -457,9 +493,8 @@ def generate_network(_words_df, font_path, _stopwords_set):
         communities = sorted(communities_generator, key=len, reverse=True)
         
         community_map = {}
-        # --- ▼ 修正点: Treemap とは異なるカラーマップを使用 (Plotly3) ---
-        # Set3 は色が薄すぎるため、ネットワークでは Plotly3 (Plotly のデフォルト) を使う
-        cmap = plt.get_cmap('Plotly3', len(communities)) 
+        # ネットワークの色もパステル (Set3) に変更
+        cmap = plt.get_cmap('Set3', len(communities)) 
         
         for i, community in enumerate(communities):
             for node in community:
@@ -511,20 +546,16 @@ def calculate_frequency(_words_list, _stopwords_set, top_n=50):
     freq_df['Rank'] = freq_df.index + 1
     return freq_df[['Rank', 'Word', 'Frequency']]
 
-# --- ▼ 修正点: Plotly Figure にも対応した fig_to_bytes ---
 # HTMLレポート生成関数
 def fig_to_bytes(fig):
     if fig is None: return None
-    # Matplotlib Figure の場合
     if isinstance(fig, plt.Figure):
         buf = io.BytesIO()
         fig.savefig(buf, format="png", bbox_inches="tight")
         buf.seek(0)
         return buf.getvalue()
-    # Plotly Figure の場合
     elif isinstance(fig, go.Figure):
         try:
-            # kaleido が必要
             return fig.to_image(format="png", width=1200, height=700, scale=2)
         except ImportError:
             st.error("HTMLレポートへの画像埋め込みには `kaleido` が必要です。`requirements.txt` に `kaleido` を追加してください。")
@@ -533,7 +564,6 @@ def fig_to_bytes(fig):
             st.error(f"Plotly画像の書き出しエラー: {e}")
             return None
     return None
-# --- ▲ 修正完了 ▲ ---
 
 def fig_to_base64_png(fig):
     img_bytes = fig_to_bytes(fig)
@@ -551,7 +581,6 @@ def generate_html_report():
         if img_base64: html_parts.append(f"<div class='result-section'><h2>💖 AI 感情分析</h2><img src='{img_base64}' alt='Sentiment Pie Chart'></div>")
 
     if 'fig_treemap_display' in st.session_state and st.session_state.fig_treemap_display:
-        # --- ▼ 修正点: Plotly の Figure にも fig_to_base64_png が対応 ---
         img_base64 = fig_to_base64_png(st.session_state.fig_treemap_display);
         if img_base64: html_parts.append(f"<div class='result-section'><h2>📊 AI クラスター分析 (Treemap)</h2><img src='{img_base64}' alt='Treemap'></div>")
     if 'ai_result_cluster_text' in st.session_state: html_parts.append(f"<div class='result-section'><h2>📊 AI クラスター分析 (解釈)</h2><pre>{st.session_state.ai_result_cluster_text}</pre></div>")
@@ -716,14 +745,14 @@ if uploaded_file:
                                 "items": {
                                     "type": "OBJECT",
                                     "properties": {
-                                        "name": {"type": "STRING", "description": "クラスター名 (例: 'ポジティブな意見 (30.0%)')"},
+                                        "name": {"type": "STRING", "description": "クラスター名 (例: 'ポジティブな意見')"},
                                         "children": {
                                             "type": "ARRAY",
                                             "description": "サブトピック（3〜5個）の配列",
                                             "items": {
                                                 "type": "OBJECT",
                                                 "properties": {
-                                                    "name": {"type": "STRING", "description": "サブトピック名 (例: 'デザインへの言及 (15.0%)')"},
+                                                    "name": {"type": "STRING", "description": "サブトピック名 (例: 'デザインへの言及')"},
                                                     "value": {"type": "NUMBER", "description": "サブトピックの割合（数値のみ）"}
                                                 },
                                                 "required": ["name", "value"]
@@ -878,7 +907,6 @@ if uploaded_file:
                         text_summary = call_gemini_api(contents_text, system_instruction=system_instr_text)
                         st.session_state.ai_result_cluster_text = text_summary
                 
-                # --- ▼ 修正点: Plotly を使った描画に変更 ---
                 # 3. Treemap (Plotly) の描画 (キャッシュ確認)
                 if 'fig_treemap_display' not in st.session_state and 'ai_result_cluster_json' in st.session_state:
                     with st.spinner("Treemapを生成中... (ステップ3/3)"):
@@ -893,8 +921,6 @@ if uploaded_file:
                     fig_treemap = st.session_state.fig_treemap_display
                     st.plotly_chart(fig_treemap, use_container_width=True) # st.pyplot -> st.plotly_chart
                     
-                    # ダウンロードボタンは Plotly が自動で提供するため削除
-
                     if 'ai_result_cluster_text' in st.session_state:
                         # 凡例と解釈はAIの応答に任せる
                         st.markdown(st.session_state.ai_result_cluster_text)
@@ -907,7 +933,6 @@ if uploaded_file:
                          st.text_area("AIのJSONレスポンス", st.session_state.ai_result_cluster_json, height=200)
                 else:
                     st.info("クラスター分析データを生成中です...")
-            # --- ▲ 修正完了 ▲ ---
             
             # --- Tab 2: WordCloud --- (tab2 に変更)
             with tab2:
