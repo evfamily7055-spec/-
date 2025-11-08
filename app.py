@@ -34,10 +34,8 @@ BASE_STOPWORDS = set([
     '行う', '言う', '申し上げる', 'まいる', '見る', 'ここ', 'そこ', 'あそこ', 'こちら', 'そちら', 'あちら', 'この', 'その', 'あの'
 ])
 
-# --- ▼ 修正点: AI分析の最大文字数制限を定義 ---
-# APIの安定性を考慮し、AIに送信するテキストの最大文字数を設定（約100万文字）
+# AI分析の最大文字数制限を定義
 MAX_AI_INPUT_CHARS = 1000000
-# --- ▲ 修正完了 ▲ ---
 
 @st.cache_data # テキストとTokenizerに変化がなければキャッシュ
 def extract_words(text, _tokenizer): # _tokenizer引数はキャッシュのキーとして使う
@@ -58,8 +56,8 @@ def extract_words(text, _tokenizer): # _tokenizer引数はキャッシュのキ�
 # --- 3. Gemini AI 分析関数 (会話対応版) ---
 
 # 1. シンプルな要約プロンプト (固定)
-# --- ▼ 修正点: 「分析スコープ」の指示を追加 ---
 SYSTEM_PROMPT_SIMPLE = """あなたは、テキストマイニングの専門家です。与えられたテキスト群を分析し、結果を詳細かつ分かりやすくマークダウン形式で出力してください。
+データは `[行番号: XX] [属性...] || テキスト` の形式で提供されます。
 {analysis_scope_instruction}
 {attributeInstruction}
 ## 1. 分析サマリー
@@ -67,21 +65,20 @@ SYSTEM_PROMPT_SIMPLE = """あなたは、テキストマイニングの専門家
 ## 2. 主要なテーマ
 (頻出するトピックや意見のカテゴリを3〜5個提示してください。**可能であれば、それぞれのテーマがおおよそ何件の意見に基づいているか（件数や割合）にも言及してください**。)
 ## 3. ポジティブな意見
-(具体的な良い点を引用しつつリストアップ)
+(具体的な良い点を引用しつつリストアップしてください。**引用する際は、[行番号: XX] も含めてください。**)
 ## 4. ネガティブな意見・課題
-(具体的な不満や改善点を引用しつつリストアップ)
+(具体的な不満や改善点を引用しつつリストアップしてください。**引用する際は、[行番号: XX] も含めてください。**)
 ## 5. 少数だが注目すべき意見
-(**件数は少ない（例: 1〜2件）かもしれないが、非常に重要、ユニーク、または示唆に富む意見があれば、ここに抽出してください**。)
+(件数は少ない（例: 1〜2件）かもしれないが、非常に重要、ユニーク、または示唆に富む意見があれば、ここに抽出してください。**引用する際は、[行番号: XX] も含めてください。**)
 {has_attribute}
 ## 7. 総評とネクストアクション
 (分析から言えること、次に行うべきアクションを提案)
 """
-# --- ▲ 修正完了 ▲ ---
 
 # 2. 学術論文用プロンプト (固定)
-# --- ▼ 修正点: 「分析スコープ」の指示を追加 ---
 SYSTEM_PROMPT_ACADEMIC = """あなたは、テキストデータを分析する計量テキスト分析（テキストマイニング）の専門家です。
 与えられたテキスト群を分析し、その結果を学術論文の「結果」および「考察」セクションに記述するのに適した、客観的かつフォーマルな文体で出力してください。
+データは `[行番号: XX] [属性...] || テキスト` の形式で提供されます。
 {analysis_scope_instruction}
 {attributeInstruction}
 以下の構成に従って、マークダウン形式で記述してください。
@@ -90,19 +87,51 @@ SYSTEM_PROMPT_ACADEMIC = """あなたは、テキストデータを分析する�
 (データ全体の主要な傾向や特筆すべき点を、客観的な要約として2〜3文で記述する)
 
 ## 2. 主要な知見 (Key Findings)
-(データから抽出された主要なテーマやトピック、頻出する意見のカテゴリを3〜5点、箇条書きで提示する。**可能であれば、それぞれのテーマがおおよそ何件の意見に基づいているか（件数や割合）にも言及し**、具体的なテキスト断片を「」で引用して所見を補強する)
+(データから抽出された主要なテーマやトピック、頻出する意見のカテゴリを3〜5点、箇条書きで提示する。**可能であれば、それぞれのテーマがおおよそ何件の意見に基づいているか（件数や割合）にも言及し**、具体的なテキスト断片を「」で引用して所見を補強する。**引用する際は、[行番号: XX] も含めること。**)
 
 ## 3. その他の注目すべき所見 (Other Notable Findings)
-(**頻度は低い（例: 1〜2件）ものの、分析上見過ごすべきではない特異な意見、または将来の課題を示唆するような意見があれば、ここに記述する**)
+(頻度は低い（例: 1〜2件）ものの、分析上見過ごすべきではない特異な意見、または将来の課題を示唆するような意見があれば、ここに記述する。**引用する際は、[行番号: XX] も含めること。**)
 {has_attribute}
 ## 5. 考察と今後の課題 (Discussion and Limitations)
 (分析結果から導かれる考察や示唆を記述する。また、データから見られる潜在的な課題や、さらなる分析の方向性についても言及する)
+"""
+
+# --- ▼ 修正点: 新しい「クラスター分析」用プロンプトを追加 ---
+SYSTEM_PROMPT_CLUSTER = """あなたは、高度なテキストクラスタリング（トピックモデリング）専門のアナリストです。
+与えられたテキスト群を分析し、主要な「言説クラスター（意見のグループ）」を特定・分類してください。
+データは `[行番号: XX] [属性...] || テキスト` の形式で提供されます。
+{analysis_scope_instruction}
+
+以下のタスクを実行し、結果をマークダウン形式で出力してください。
+
+1.  全てのテキストデータを読み込み、内容が類似する意見のグループ（クラスター）に分類してください。
+2.  主要なクラスターを3〜5個特定してください。
+3.  各主要クラスターについて、以下の形式で詳細に出力してください:
+
+---
+## クラスターA: [クラスターの要約タイトル]
+**(分析対象データに占めるおおよその割合: XX.X%)**
+
+* **このクラスターの概要:**
+    (クラスター全体を説明する簡潔な文章をここに記述)
+
+* **構成サブトピック:**
+    * サブトピック1 (例: [具体的な意見やテーマ])
+    * サブトピック2 (例: [具体的な意見やテーマ])
+    * (必要に応じて追加)
+
+* **代表的な意見（引用）:**
+    * "[行番号: XX] ... [引用文] ..."
+    * "[行番号: YY] ... [引用文] ..."
+---
+(クラスターB、Cと続ける)
 """
 # --- ▲ 修正完了 ▲ ---
 
 
 # 3. 会話用プロンプト (可変)
 SYSTEM_PROMPT_CHAT = """あなたは、与えられたテキストデータ（コンテキスト）に関する質問に答える、優秀なデータアナリストです。
+コンテキストは `[行番号: XX] [属性...] || テキスト` の形式で提供されます。
 ユーザーからの質問に対し、提供されたコンテキスト情報に基づいて、簡潔かつ的確に回答してください。
 コンテキストに含まれていない情報については、その旨を正直に伝えてください。
 """
@@ -112,7 +141,7 @@ def call_gemini_api(contents, system_instruction=None):
     except Exception: return "AI分析エラー: Streamlit CloudのSecretsに `GEMINI_API_KEY` が設定されていません。"
     if not apiKey: return "AI分析エラー: Streamlit CloudのSecretsに `GEMINI_API_KEY` が設定されていません。"
 
-    apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={apiKey}"
+    apiUrl = f"https.generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={apiKey}"
 
     payload = {"contents": contents}
     if system_instruction:
@@ -240,6 +269,9 @@ def generate_html_report():
     html_parts.append("<style>body{font-family:sans-serif;margin:20px}h1,h2,h3{color:#333;border-bottom:1px solid #ccc;padding-bottom:5px}h2{margin-top:30px}.result-section{margin-bottom:30px;padding:15px;border:1px solid #eee;border-radius:5px;background-color:#f9f9f9}img{max-width:100%;height:auto;border:1px solid #ddd;margin-top:10px}table{border-collapse:collapse;width:100%;margin-top:10px}th,td{border:1px solid #ddd;padding:8px;text-align:left}th{background-color:#f2f2f2}pre{background-color:#eee;padding:10px;border-radius:3px;white-space:pre-wrap;word-wrap:break-word}</style>")
     html_parts.append("</head><body><h1>テキスト分析レポート</h1>")
     if 'ai_result_simple' in st.session_state: html_parts.append(f"<div class='result-section'><h2>🤖 AI サマリー (簡易)</h2><pre>{st.session_state.ai_result_simple}</pre></div>")
+    # --- ▼ 修正点: HTMLレポートにクラスター分析の結果を追加 ---
+    if 'ai_result_cluster' in st.session_state: html_parts.append(f"<div class='result-section'><h2>📊 AI クラスター分析</h2><pre>{st.session_state.ai_result_cluster}</pre></div>")
+    # --- ▲ 修正完了 ▲ ---
     if 'fig_wc_display' in st.session_state and st.session_state.fig_wc_display:
         img_base64 = fig_to_base64_png(st.session_state.fig_wc_display);
         if img_base64: html_parts.append(f"<div class='result-section'><h2>☁️ WordCloud (全体)</h2><img src='{img_base64}' alt='WordCloud Overall'></div>")
@@ -281,10 +313,7 @@ if uploaded_file:
             text_column = st.selectbox("分析したいテキスト列", all_columns, index=0)
             attribute_columns = st.multiselect("分析軸 (複数OK: 例: 年代, 性別)", all_columns)
             
-            # --- ▼ 修正点: サンプル件数の指定を削除し、全件分析の注記を追加 ---
-            # st.number_input(...) を削除
             st.info(f"AI分析は全件（最大{MAX_AI_INPUT_CHARS:,}文字）を対象とします。統計分析は常に全件が対象です。", icon="ℹ️")
-            # --- ▲ 修正完了 ▲ ---
 
             st.markdown("---")
             run_button = st.button("分析を実行", type="primary", use_container_width=True)
@@ -308,11 +337,10 @@ if uploaded_file:
                         st.session_state.text_column = text_column
                         st.session_state.attribute_columns = attribute_columns
                         
-                        # --- ▼ 修正点: ai_sample_size をセッションから削除 ---
-                        # st.session_state.ai_sample_size = ai_sample_size
-                        # --- ▲ 修正完了 ▲ ---
-
                         st.session_state.pop('ai_result_simple', None); st.session_state.pop('ai_result_academic', None)
+                        # --- ▼ 修正点: 新しいAI分析タブのキャッシュもクリア ---
+                        st.session_state.pop('ai_result_cluster', None)
+                        # --- ▲ 修正完了 ▲ ---
                         st.session_state.pop('fig_wc_display', None); st.session_state.pop('wc_error_display', None)
                         st.session_state.pop('fig_net_display', None); st.session_state.pop('net_error_display', None)
                         st.session_state.pop('chi2_results_display', None); st.session_state.pop('chi2_error_display', None)
@@ -351,13 +379,23 @@ if uploaded_file:
             current_stopwords_set = BASE_STOPWORDS.union(dynamic_sw_set)
             st.markdown("---")
 
-            tab_names = ["🤖 AI サマリー (簡易)", "☁️ WordCloud", "📊 単語頻度ランキング", "🕸️ 共起ネットワーク", "🔍 KWIC (文脈検索)", "📈 属性別 特徴語", "📝 AI 学術論文", "💬 AI チャット"]
-            tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(tab_names) # タブ変数を8つに戻す
+            # --- ▼ 修正点: タブ名リストとタブ変数を9個に増やす ---
+            tab_names = ["🤖 AI サマリー (簡易)", "📊 AI クラスター分析", "☁️ WordCloud", "📊 単語頻度ランキング", "🕸️ 共起ネットワーク", "🔍 KWIC (文脈検索)", "📈 属性別 特徴語", "📝 AI 学術論文", "💬 AI チャット"]
+            tab1, tab_cluster, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(tab_names)
+            # --- ▲ 修正完了 ▲ ---
 
-            # --- ▼ 修正点: AIに渡すテキストと件数を生成するロジック（Tab1, 7, 8共通） ---
+            # --- (共通) AIに渡すテキストと件数を生成するロジック ---
+            
             def format_for_ai(row):
-                text = row[text_column] or ''; attrs = [str(row[col] or 'N/A') for col in attribute_columns]
-                return f"[{' | '.join(attrs)}] || {text}" if attrs else text
+                # row.name は 0-based index。Excelの行番号 (1-based header) に合わせるため +2
+                excel_row_num = row.name + 2 
+                text = row[text_column] or ''; 
+                attrs = [str(row[col] or 'N/A') for col in attribute_columns]
+                
+                id_str = f"[行番号: {excel_row_num}]"
+                attr_str = f"[{' | '.join(attrs)}]" if attrs else ""
+                
+                return f"{id_str} {attr_str} || {text}"
 
             # AIに渡すテキストと、実際に渡した件数を正確に把握する
             total_items = len(df_analyzed)
@@ -365,9 +403,8 @@ if uploaded_file:
             current_char_count = 0
             analyzed_items = 0
 
-            for _, row in df_analyzed.iterrows():
-                row_text = format_for_ai(row) + "\n"
-                # 次の行を追加すると上限を超える場合は、現在の行を追加せずにループを終了
+            for index, row in df_analyzed.iterrows():
+                row_text = format_for_ai(row) + "\n" 
                 if current_char_count + len(row_text) > MAX_AI_INPUT_CHARS:
                     break
                 ai_input_parts.append(row_text)
@@ -383,7 +420,7 @@ if uploaded_file:
             else:
                 analysis_scope_instr = f"【重要】全 {total_items:,} 件のデータが提供されています。分析や件数・割合の計算は、この {total_items:,} 件のデータを「全体」として行ってください。"
                 analysis_scope_warning = f"AI分析は全 {total_items:,} 件を対象に実行されました。"
-            # --- ▲ 修正完了 ▲ ---
+            # --- (共通ロジックここまで) ---
 
 
             # --- Tab 1: AI サマリー (簡易) ---
@@ -391,8 +428,6 @@ if uploaded_file:
                 if 'ai_result_simple' not in st.session_state:
                     with st.spinner("AIによる要約を生成中..."):
                         
-                        # --- ▼ 修正点: 新しいロジックの結果を使用 ---
-                        # 警告/情報メッセージを表示
                         if analyzed_items < total_items: st.warning(analysis_scope_warning, icon="⚠️")
                         else: st.info(analysis_scope_warning, icon="✅")
 
@@ -401,19 +436,37 @@ if uploaded_file:
                         has_attribute_str_s = "## 6. 属性別の傾向 (もしあれば)\n(属性ごとの特徴的な意見を比較)" if has_attr else ""
                         attr_instr_s = "データは「属性 || テキスト」の形式です。属性ごとの傾向や違いにも着目して分析してください。" if has_attr else ""
                         
-                        # プロンプトに「分析スコープ」の指示を追加
                         system_instr_s = SYSTEM_PROMPT_SIMPLE.format(
                             analysis_scope_instruction=analysis_scope_instr,
                             attributeInstruction=attr_instr_s, 
                             has_attribute=has_attribute_str_s
                         )
                         st.session_state.ai_result_simple = call_gemini_api(contents, system_instruction=system_instr_s)
-                        # --- ▲ 修正完了 ▲ ---
                 st.markdown(st.session_state.ai_result_simple)
+
+            # --- ▼ 修正点: 新しい「AI クラスター分析」タブのロジック ---
+            with tab_cluster:
+                st.subheader("AIによる言説クラスター分析")
+                if 'ai_result_cluster' not in st.session_state:
+                    with st.spinner("AIによるクラスター分析を実行中..."):
+                        
+                        # 警告/情報メッセージを表示
+                        if analyzed_items < total_items: st.warning(analysis_scope_warning, icon="⚠️")
+                        else: st.info(analysis_scope_warning, icon="✅")
+
+                        contents = [{"parts": [{"text": ai_input_text}]}]
+                        
+                        # クラスター分析用のプロンプトをフォーマット
+                        system_instr_c = SYSTEM_PROMPT_CLUSTER.format(
+                            analysis_scope_instruction=analysis_scope_instr
+                        )
+                        st.session_state.ai_result_cluster = call_gemini_api(contents, system_instruction=system_instr_c)
+                st.markdown(st.session_state.ai_result_cluster)
+            # --- ▲ 修正完了 ▲ ---
 
             # --- Tab 2: WordCloud ---
             with tab2:
-                # (変更なし、解説文のみ復元)
+                # (変更なし)
                 st.subheader("全体のWordCloud")
                 if 'fig_wc_display' not in st.session_state:
                     with st.spinner("WordCloudを生成中..."):
@@ -465,7 +518,7 @@ if uploaded_file:
 
             # --- Tab 3: 単語頻度ランキング ---
             with tab3:
-                # (変更なし、解説文のみ復元)
+                # (変更なし)
                 st.subheader("全体の単語頻度ランキング (Top 50)")
                 if 'overall_freq_df_display' not in st.session_state:
                      with st.spinner("全体の単語頻度を計算中..."):
@@ -515,7 +568,7 @@ if uploaded_file:
 
             # --- Tab 4: 共起ネットワーク ---
             with tab4:
-                # (変更なし、解説文のみ復元)
+                # (変更なし)
                 if 'fig_net_display' not in st.session_state:
                     with st.spinner("共起ネットワークを生成中..."):
                         fig_net, net_error = generate_network(df_analyzed['words'], font_path, current_stopwords_set)
@@ -544,7 +597,7 @@ if uploaded_file:
 
             # --- Tab 5: KWIC (文脈検索) ---
             with tab5:
-                # (変更なし、解説文のみ復元)
+                # (変更なし)
                 st.subheader("KWIC (文脈検索)")
                 st.info("キーワードに `*` を含めるとワイルドカード検索が可能です (例: `顧客*`)。")
                 kwic_keyword = st.text_input("文脈を検索したい単語を入力してください", key="kwic_input")
@@ -567,7 +620,7 @@ if uploaded_file:
 
             # --- Tab 6: 属性別 特徴語 ---
             with tab6:
-                # (変更なし、解説文のみ復元)
+                # (変更なし)
                 st.subheader("属性別 特徴語（カイ二乗検定）")
                 if not attribute_columns: st.warning("この分析を行うには分析軸を選択してください。")
                 else:
@@ -617,7 +670,6 @@ if uploaded_file:
                 if 'ai_result_academic' not in st.session_state:
                     with st.spinner("AIによる学術論文風の要約を生成中..."):
 
-                        # --- ▼ 修正点: 新しいロジックの結果を使用 ---
                         # 警告/情報メッセージを表示
                         if analyzed_items < total_items: st.warning(analysis_scope_warning, icon="⚠️")
                         else: st.info(analysis_scope_warning, icon="✅")
@@ -627,20 +679,18 @@ if uploaded_file:
                         has_attribute_str_a = "## 4. 属性間の比較分析 (Comparative Analysis)\n(属性（カテゴリ）間で見られた顕著な差異や特徴的な傾向について、具体的に比較・記述する)" if has_attr_a else ""
                         attr_instr_a = "データは「属性 || テキスト」の形式です。属性ごとの傾向や違いにも着目して分析してください。" if has_attr_a else ""
                         
-                        # プロンプトに「分析スコープ」の指示を追加
                         system_instr_a = SYSTEM_PROMPT_ACADEMIC.format(
                             analysis_scope_instruction=analysis_scope_instr,
                             attributeInstruction=attr_instr_a, 
                             has_attribute=has_attribute_str_a
                         )
                         st.session_state.ai_result_academic = call_gemini_api(contents_acad, system_instruction=system_instr_a)
-                        # --- ▲ 修正完了 ▲ ---
                 st.markdown(st.session_state.ai_result_academic)
                 
             # --- Tab 8: AI チャット ---
             with tab8:
                 st.subheader("💬 AI チャット (データ分析)")
-                st.info("AIに質問できます。") # シンプルな説明に変更
+                st.info("AIに質問できます。") 
                 if "chat_messages" not in st.session_state: st.session_state.chat_messages = []
                 for message in st.session_state.chat_messages:
                     with st.chat_message(message["role"]): st.markdown(message["content"])
@@ -649,15 +699,13 @@ if uploaded_file:
                     with st.chat_message("user"): st.markdown(prompt)
                     with st.spinner("AIが応答を生成中..."):
                         
-                        # --- ▼ 修正点: 新しいロジックの結果を使用 ---
                         # 警告/情報メッセージをチャット内に表示
                         if analyzed_items < total_items: 
                             with st.chat_message("assistant", avatar="⚠️"):
                                 st.warning(f"（AIへの参照データは、全{total_items:,}件中、先頭{analyzed_items:,}件に制限されています）")
                         
-                        # コンテキストとして使用するテキスト
+                        # コンテキストとして使用するテキスト (Tab1, 7 と共通)
                         context_text = ai_input_text
-                        # --- ▲ 修正完了 ▲ ---
 
                         api_contents = []
                         # 最初のユーザーターンにコンテキストを追加し、それ以降は単純な会話履歴とする
