@@ -120,6 +120,7 @@ SYSTEM_PROMPT_CLUSTER_JSON = """あなたは高度なテキストクラスタリ
 """
 
 # 4. クラスター分析 (テキスト解釈用) のシステムプロンプト
+# --- ▼ 修正点: AIに「凡例」の生成を指示 ---
 SYSTEM_PROMPT_CLUSTER_TEXT = """あなたはテキストアナリストです。以下のJSONは、テキストデータをクラスター分析した結果です。
 {analysis_scope_instruction}
 
@@ -127,9 +128,20 @@ SYSTEM_PROMPT_CLUSTER_TEXT = """あなたはテキストアナリストです。
 {json_data}
 
 [あなたのタスク]
-このJSONデータを解釈し、各主要クラスター（`children`の第一階層）がどのような意見グループなのかを、**概要テキスト**としてマークダウン形式で分かりやすく説明してください。
-サブトピック（`children`の第二階層）にも触れながら、なぜそのように分類されたのかを具体的に考察してください。
+このJSONデータを解釈し、分析結果をマークダウン形式で分かりやすく説明してください。
+**必ず以下の構成に従ってください。**
+
+## 凡例 (色と主要クラスター)
+（グラフの各色（例: 薄い青、薄い緑など）が、どの主要クラスターに対応しているかをリスト形式で説明してください。**色は `Set3` カラーマップの順番です。**）
+- [色1 (例: 薄い緑)]: [クラスターAの名前]
+- [色2 (例: 薄いオレンジ)]: [クラスターBの名前]
+- [色3 (例: 薄い青)]: [クラスターCの名前]
+...
+
+## AIによるクラスターの解釈
+（次に、各主要クラスターがどのような意見グループなのかを詳細に説明してください。サブトピックにも触れながら、なぜそのように分類されたのかを具体的に考察してください。）
 """
+# --- ▲ 修正完了 ▲ ---
 
 
 # 5. 会話用プロンプト (可変)
@@ -217,12 +229,9 @@ def calculate_characteristic_words(_df, attribute_col, text_col, _stopwords_set)
         characteristic_words.sort(key=lambda x: x[1]); results[attr_value] = characteristic_words[:20]
     return results
 
-# --- ▼ 修正点: `squarify` (matplotlib) を使ったTreemap描画関数に変更 ---
+# --- ▼ 修正点: `squarify` (matplotlib) を使ったTreemap描画関数 ---
+# (HTML/D3.js の `create_treemap_html` は削除)
 def create_treemap_figure(json_data_str):
-    """
-    AIが生成したJSONデータから、matplotlibとsquarifyを使用して
-    静的なTreemap（画像）を生成します。
-    """
     try:
         data = json.loads(json_data_str)
         if 'children' not in data or not data['children']:
@@ -236,57 +245,49 @@ def create_treemap_figure(json_data_str):
     labels = []
     color_list = []
     
-    # Matplotlibのカラーマップ (タブレット用の10色) を使用
-    cmap = plt.get_cmap("tab10")
+    # --- ▼ 修正点: 色を "tab10" から "Set3" (パステルカラー) に変更 ---
+    cmap = plt.get_cmap("Set3")
     cluster_colors = {}
     color_index = 0
 
-    # データを squarify が要求する形式 (sizes, labels, colors) に平坦化
     for cluster in data.get('children', []):
         cluster_name = cluster.get('name', '不明なクラスター')
         
-        # 親クラスターの色を決定
         if cluster_name not in cluster_colors:
-            cluster_colors[cluster_name] = cmap(color_index % 10) # 10色で循環
+            cluster_colors[cluster_name] = cmap(color_index % 12) # Set3は12色
             color_index += 1
         cluster_color = cluster_colors[cluster_name]
         
         sub_topics = cluster.get('children', [])
         if not sub_topics:
-            # サブトピックがなく、クラスター自体に value がある場合
-            # (AIのJSONスキーマはこれを想定していないが、念のため)
-            sizes.append(cluster.get('value', 1)) # value がなければ 1
-            labels.append(cluster_name)
-            color_list.append(cluster_color)
+            continue # スキーマ通りならサブトピックがあるはず
         else:
-            # サブトピック（葉ノード）をプロット
             for sub_topic in sub_topics:
                 sub_value = sub_topic.get('value', 0)
-                # valueが0やマイナスだと squarify がエラーを起こすため除外
                 if sub_value > 0: 
                     sizes.append(sub_value)
-                    # ラベルに (X.X%) が既に入っている前提
                     labels.append(sub_topic.get('name', '不明なトピック'))
-                    color_list.append(cluster_color) # 親クラスターの色を使用
+                    color_list.append(cluster_color) 
 
     if not sizes:
         return None, "描画対象となるサブトピック（value > 0）が見つかりませんでした。"
 
     try:
-        # japanize_matplotlib がロードされているため、日本語フォントは自動で適用される
         fig, ax = plt.subplots(figsize=(16, 9))
         
-        # squarify でプロット
-        # text_kwargs でフォントの色と自動折り返しを指定
+        # --- ▼ 修正点: 輪郭(edgecolor)と文字(text_kwargs)を調整 ---
         squarify.plot(
             sizes=sizes, 
             label=labels, 
             color=color_list, 
             ax=ax,
-            text_kwargs={'color':'white', 'fontsize':10, 'wrap':True} # テキストを白に、自動折り返しを有効に
+            edgecolor="white", # 輪郭を白に
+            linewidth=2,       # 輪郭の太さを2に
+            text_kwargs={'color':'#222222', 'fontsize':10, 'wrap':True} # 文字を濃いグレーに、自動折り返し
         )
+        # --- ▲ 修正完了 ▲ ---
         
-        ax.set_title("トピック構成 (Treemap)", fontsize=18, color="black") # タイトルの色
+        ax.set_title("トピック構成 (Treemap)", fontsize=18)
         ax.axis('off')
         
         plt.close(fig) # メモリ解放
@@ -319,20 +320,17 @@ def generate_network(_words_df, font_path, _stopwords_set):
         unique_words = sorted(list(set(word for word in words if word not in _stopwords_set)))
         for w1, w2 in combinations(unique_words, 2): co_occur_counter[(w1, w2)] += 1
     
-    # ノード数を増やす (50 -> 70)
     top_pairs = co_occur_counter.most_common(70) 
     
     if top_pairs:
         G = nx.Graph()
         for (w1, w2), weight in top_pairs: G.add_edge(w1, w2, weight=weight)
         
-        # グラフが密になりすぎるのを防ぐため、サイズとkの値を調整
-        fig_net, ax = plt.subplots(figsize=(16, 16)); # サイズを 14->16 に
-        pos = nx.spring_layout(G, k=0.9, iterations=50) # k=0.8 -> 0.9
+        fig_net, ax = plt.subplots(figsize=(16, 16)); 
+        pos = nx.spring_layout(G, k=0.9, iterations=50) 
         
         nx.draw_networkx_nodes(G, pos, node_size=2000, node_color='lightblue', alpha=0.8)
         
-        # エッジの太さを細くする (0.2 -> 0.1)
         edge_weights = [d['weight'] * 0.1 for u,v,d in G.edges(data=True)] 
         
         nx.draw_networkx_edges(G, pos, width=edge_weights, alpha=0.4, edge_color='gray')
@@ -364,12 +362,10 @@ def generate_html_report():
     html_parts.append("</head><body><h1>テキスト分析レポート</h1>")
     if 'ai_result_simple' in st.session_state: html_parts.append(f"<div class='result-section'><h2>🤖 AI サマリー (簡易)</h2><pre>{st.session_state.ai_result_simple}</pre></div>")
     
-    # --- ▼ 修正点: HTMLレポートに Treemap の「画像」と「解釈」を追加 ---
     if 'fig_treemap_display' in st.session_state and st.session_state.fig_treemap_display:
         img_base64 = fig_to_base64_png(st.session_state.fig_treemap_display);
         if img_base64: html_parts.append(f"<div class='result-section'><h2>📊 AI クラスター分析 (Treemap)</h2><img src='{img_base64}' alt='Treemap'></div>")
     if 'ai_result_cluster_text' in st.session_state: html_parts.append(f"<div class='result-section'><h2>📊 AI クラスター分析 (解釈)</h2><pre>{st.session_state.ai_result_cluster_text}</pre></div>")
-    # --- ▲ 修正完了 ▲ ---
 
     if 'fig_wc_display' in st.session_state and st.session_state.fig_wc_display:
         img_base64 = fig_to_base64_png(st.session_state.fig_wc_display);
@@ -439,8 +435,8 @@ if uploaded_file:
                         st.session_state.pop('ai_result_simple', None); st.session_state.pop('ai_result_academic', None)
                         st.session_state.pop('ai_result_cluster_json', None)
                         st.session_state.pop('ai_result_cluster_text', None)
-                        st.session_state.pop('fig_treemap_display', None) # --- ▼ Treemapのキャッシュもクリア ---
-                        st.session_state.pop('treemap_error_display', None) # --- ▲ ---
+                        st.session_state.pop('fig_treemap_display', None) 
+                        st.session_state.pop('treemap_error_display', None)
                         st.session_state.pop('fig_wc_display', None); st.session_state.pop('wc_error_display', None)
                         st.session_state.pop('fig_net_display', None); st.session_state.pop('net_error_display', None)
                         st.session_state.pop('chi2_results_display', None); st.session_state.pop('chi2_error_display', None)
@@ -541,7 +537,9 @@ if uploaded_file:
             # --- ▼ 修正点: (新設) AI クラスター分析タブ (JSON + Matplotlib/squarify) ---
             with tab_cluster:
                 st.subheader("AIによる言説クラスター分析 (Treemap)")
-                st.info("AIがテキストを階層的なトピックに分類し、その構成比（面積）を可視化します。画像としてダウンロード可能です。")
+                # --- ▼ 修正点: 凡例は下に表示される旨を記載 ---
+                st.info("AIがテキストを階層的なトピックに分類し、その構成比（面積）を可視化します。色の凡例と解釈は、グラフの下に表示されます。")
+                # --- ▲ 修正完了 ▲ ---
 
                 # 1. JSONデータの生成 (キャッシュ確認)
                 if 'ai_result_cluster_json' not in st.session_state:
@@ -626,14 +624,15 @@ if uploaded_file:
                     if img_bytes: st.download_button("この画像をダウンロード (PNG)", img_bytes, "treemap.png", "image/png")
 
                     if 'ai_result_cluster_text' in st.session_state:
-                        st.subheader("AIによるクラスターの解釈")
+                        # 凡例と解釈はAIの応答に任せる
                         st.markdown(st.session_state.ai_result_cluster_text)
                     else:
                         st.info("クラスターの解釈を生成中です...")
                 
                 elif 'treemap_error_display' in st.session_state:
                     st.error(st.session_state.treemap_error_display)
-                    st.text_area("AIのJSONレスポンス", st.session_state.ai_result_cluster_json, height=200)
+                    if 'ai_result_cluster_json' in st.session_state:
+                         st.text_area("AIのJSONレスポンス", st.session_state.ai_result_cluster_json, height=200)
                 else:
                     st.info("クラスター分析データを生成中です...")
             # --- ▲ 修正完了 ▲ ---
