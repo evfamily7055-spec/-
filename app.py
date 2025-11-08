@@ -96,7 +96,7 @@ SYSTEM_PROMPT_ACADEMIC = """あなたは、テキストデータを分析する�
 (分析結果から導かれる考察や示唆を記述する。また、データから見られる潜在的な課題や、さらなる分析の方向性についても言及する)
 """
 
-# --- ▼ 修正点: 新しい「クラスター分析」用プロンプトを追加 ---
+# 3. クラスター分析用プロンプト (固定)
 SYSTEM_PROMPT_CLUSTER = """あなたは、高度なテキストクラスタリング（トピックモデリング）専門のアナリストです。
 与えられたテキスト群を分析し、主要な「言説クラスター（意見のグループ）」を特定・分類してください。
 データは `[行番号: XX] [属性...] || テキスト` の形式で提供されます。
@@ -126,10 +126,9 @@ SYSTEM_PROMPT_CLUSTER = """あなたは、高度なテキストクラスタリ�
 ---
 (クラスターB、Cと続ける)
 """
-# --- ▲ 修正完了 ▲ ---
 
 
-# 3. 会話用プロンプト (可変)
+# 4. 会話用プロンプト (可変)
 SYSTEM_PROMPT_CHAT = """あなたは、与えられたテキストデータ（コンテキスト）に関する質問に答える、優秀なデータアナリストです。
 コンテキストは `[行番号: XX] [属性...] || テキスト` の形式で提供されます。
 ユーザーからの質問に対し、提供されたコンテキスト情報に基づいて、簡潔かつ的確に回答してください。
@@ -141,7 +140,9 @@ def call_gemini_api(contents, system_instruction=None):
     except Exception: return "AI分析エラー: Streamlit CloudのSecretsに `GEMINI_API_KEY` が設定されていません。"
     if not apiKey: return "AI分析エラー: Streamlit CloudのSecretsに `GEMINI_API_KEY` が設定されていません。"
 
-    apiUrl = f"https.generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={apiKey}"
+    # --- ▼ 修正点: URLのタイプミス (httpss -> https) を修正 ---
+    apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={apiKey}"
+    # --- ▲ 修正完了 ▲ ---
 
     payload = {"contents": contents}
     if system_instruction:
@@ -269,9 +270,7 @@ def generate_html_report():
     html_parts.append("<style>body{font-family:sans-serif;margin:20px}h1,h2,h3{color:#333;border-bottom:1px solid #ccc;padding-bottom:5px}h2{margin-top:30px}.result-section{margin-bottom:30px;padding:15px;border:1px solid #eee;border-radius:5px;background-color:#f9f9f9}img{max-width:100%;height:auto;border:1px solid #ddd;margin-top:10px}table{border-collapse:collapse;width:100%;margin-top:10px}th,td{border:1px solid #ddd;padding:8px;text-align:left}th{background-color:#f2f2f2}pre{background-color:#eee;padding:10px;border-radius:3px;white-space:pre-wrap;word-wrap:break-word}</style>")
     html_parts.append("</head><body><h1>テキスト分析レポート</h1>")
     if 'ai_result_simple' in st.session_state: html_parts.append(f"<div class='result-section'><h2>🤖 AI サマリー (簡易)</h2><pre>{st.session_state.ai_result_simple}</pre></div>")
-    # --- ▼ 修正点: HTMLレポートにクラスター分析の結果を追加 ---
     if 'ai_result_cluster' in st.session_state: html_parts.append(f"<div class='result-section'><h2>📊 AI クラスター分析</h2><pre>{st.session_state.ai_result_cluster}</pre></div>")
-    # --- ▲ 修正完了 ▲ ---
     if 'fig_wc_display' in st.session_state and st.session_state.fig_wc_display:
         img_base64 = fig_to_base64_png(st.session_state.fig_wc_display);
         if img_base64: html_parts.append(f"<div class='result-section'><h2>☁️ WordCloud (全体)</h2><img src='{img_base64}' alt='WordCloud Overall'></div>")
@@ -338,9 +337,7 @@ if uploaded_file:
                         st.session_state.attribute_columns = attribute_columns
                         
                         st.session_state.pop('ai_result_simple', None); st.session_state.pop('ai_result_academic', None)
-                        # --- ▼ 修正点: 新しいAI分析タブのキャッシュもクリア ---
-                        st.session_state.pop('ai_result_cluster', None)
-                        # --- ▲ 修正完了 ▲ ---
+                        st.session_state.pop('ai_result_cluster', None) # クラスター分析もクリア
                         st.session_state.pop('fig_wc_display', None); st.session_state.pop('wc_error_display', None)
                         st.session_state.pop('fig_net_display', None); st.session_state.pop('net_error_display', None)
                         st.session_state.pop('chi2_results_display', None); st.session_state.pop('chi2_error_display', None)
@@ -379,11 +376,10 @@ if uploaded_file:
             current_stopwords_set = BASE_STOPWORDS.union(dynamic_sw_set)
             st.markdown("---")
 
-            # --- ▼ 修正点: タブ名リストとタブ変数を9個に増やす ---
+            # タブ名リストとタブ変数を9個に増やす
             tab_names = ["🤖 AI サマリー (簡易)", "📊 AI クラスター分析", "☁️ WordCloud", "📊 単語頻度ランキング", "🕸️ 共起ネットワーク", "🔍 KWIC (文脈検索)", "📈 属性別 特徴語", "📝 AI 学術論文", "💬 AI チャット"]
             tab1, tab_cluster, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(tab_names)
-            # --- ▲ 修正完了 ▲ ---
-
+            
             # --- (共通) AIに渡すテキストと件数を生成するロジック ---
             
             def format_for_ai(row):
@@ -444,29 +440,25 @@ if uploaded_file:
                         st.session_state.ai_result_simple = call_gemini_api(contents, system_instruction=system_instr_s)
                 st.markdown(st.session_state.ai_result_simple)
 
-            # --- ▼ 修正点: 新しい「AI クラスター分析」タブのロジック ---
+            # --- (新設) AI クラスター分析タブ ---
             with tab_cluster:
                 st.subheader("AIによる言説クラスター分析")
                 if 'ai_result_cluster' not in st.session_state:
                     with st.spinner("AIによるクラスター分析を実行中..."):
                         
-                        # 警告/情報メッセージを表示
                         if analyzed_items < total_items: st.warning(analysis_scope_warning, icon="⚠️")
                         else: st.info(analysis_scope_warning, icon="✅")
 
                         contents = [{"parts": [{"text": ai_input_text}]}]
                         
-                        # クラスター分析用のプロンプトをフォーマット
                         system_instr_c = SYSTEM_PROMPT_CLUSTER.format(
                             analysis_scope_instruction=analysis_scope_instr
                         )
                         st.session_state.ai_result_cluster = call_gemini_api(contents, system_instruction=system_instr_c)
                 st.markdown(st.session_state.ai_result_cluster)
-            # --- ▲ 修正完了 ▲ ---
-
-            # --- Tab 2: WordCloud ---
+            
+            # --- Tab 2: WordCloud --- (tab2 に変更)
             with tab2:
-                # (変更なし)
                 st.subheader("全体のWordCloud")
                 if 'fig_wc_display' not in st.session_state:
                     with st.spinner("WordCloudを生成中..."):
@@ -516,9 +508,8 @@ if uploaded_file:
                                 if img_bytes: st.download_button(f"「{val}」の画像をダウンロード", img_bytes, f"wordcloud_attr_{val}.png", "image/png")
                             else: st.warning(wc_subset_error)
 
-            # --- Tab 3: 単語頻度ランキング ---
+            # --- Tab 3: 単語頻度ランキング --- (tab3 に変更)
             with tab3:
-                # (変更なし)
                 st.subheader("全体の単語頻度ランキング (Top 50)")
                 if 'overall_freq_df_display' not in st.session_state:
                      with st.spinner("全体の単語頻度を計算中..."):
@@ -566,9 +557,8 @@ if uploaded_file:
                                 if freq_df.empty: st.info("単語なし")
                                 else: st.dataframe(freq_df, use_container_width=True)
 
-            # --- Tab 4: 共起ネットワーク ---
+            # --- Tab 4: 共起ネットワーク --- (tab4 に変更)
             with tab4:
-                # (変更なし)
                 if 'fig_net_display' not in st.session_state:
                     with st.spinner("共起ネットワークを生成中..."):
                         fig_net, net_error = generate_network(df_analyzed['words'], font_path, current_stopwords_set)
@@ -595,9 +585,8 @@ if uploaded_file:
                         > 図2より、[単語A]と[単語B]が強い共起関係（太いエッジ）にあることが確認された。また、[単語C]を中心として[単語D, E, F]がクラスターを形成しており、...といった文脈で語られていることが示唆された。
                     """)
 
-            # --- Tab 5: KWIC (文脈検索) ---
+            # --- Tab 5: KWIC (文脈検索) --- (tab5 に変更)
             with tab5:
-                # (変更なし)
                 st.subheader("KWIC (文脈検索)")
                 st.info("キーワードに `*` を含めるとワイルドカード検索が可能です (例: `顧客*`)。")
                 kwic_keyword = st.text_input("文脈を検索したい単語を入力してください", key="kwic_input")
@@ -618,9 +607,8 @@ if uploaded_file:
                         > ... [単語A]は、主に「...」といった文脈でポジティブに使用される一方、「...」というネガティブな文脈でも出現しており、...
                     """)
 
-            # --- Tab 6: 属性別 特徴語 ---
+            # --- Tab 6: 属性別 特徴語 --- (tab6 に変更)
             with tab6:
-                # (変更なし)
                 st.subheader("属性別 特徴語（カイ二乗検定）")
                 if not attribute_columns: st.warning("この分析を行うには分析軸を選択してください。")
                 else:
@@ -664,13 +652,12 @@ if uploaded_file:
                         > 表2の結果より、「A群」では[単語X, Y]が、「B群」では[単語Z]が特徴的に出現しており、...
                     """)
 
-            # --- Tab 7: AI 学術論文 ---
+            # --- Tab 7: AI 学術論文 --- (tab7 に変更)
             with tab7:
                 st.subheader("AIによる学術論文風サマリー")
                 if 'ai_result_academic' not in st.session_state:
                     with st.spinner("AIによる学術論文風の要約を生成中..."):
 
-                        # 警告/情報メッセージを表示
                         if analyzed_items < total_items: st.warning(analysis_scope_warning, icon="⚠️")
                         else: st.info(analysis_scope_warning, icon="✅")
                         
@@ -687,7 +674,7 @@ if uploaded_file:
                         st.session_state.ai_result_academic = call_gemini_api(contents_acad, system_instruction=system_instr_a)
                 st.markdown(st.session_state.ai_result_academic)
                 
-            # --- Tab 8: AI チャット ---
+            # --- Tab 8: AI チャット --- (tab8 に変更)
             with tab8:
                 st.subheader("💬 AI チャット (データ分析)")
                 st.info("AIに質問できます。") 
@@ -699,23 +686,18 @@ if uploaded_file:
                     with st.chat_message("user"): st.markdown(prompt)
                     with st.spinner("AIが応答を生成中..."):
                         
-                        # 警告/情報メッセージをチャット内に表示
                         if analyzed_items < total_items: 
                             with st.chat_message("assistant", avatar="⚠️"):
                                 st.warning(f"（AIへの参照データは、全{total_items:,}件中、先頭{analyzed_items:,}件に制限されています）")
                         
-                        # コンテキストとして使用するテキスト (Tab1, 7 と共通)
                         context_text = ai_input_text
 
                         api_contents = []
-                        # 最初のユーザーターンにコンテキストを追加し、それ以降は単純な会話履歴とする
                         first_user_message = f"""以下のテキストデータ（コンテキスト）について質問があります。\n\n--- コンテキスト ---\n{context_text}\n\n--- 質問 ---\n{prompt}"""
                         is_first_turn = len(st.session_state.chat_messages) == 1
                         
-                        # 既存の履歴を変換
                         for msg in st.session_state.chat_messages[:-1]:
                             api_contents.append({"role": "user" if msg["role"] == "user" else "model", "parts": [{"text": msg["content"]}]})
-                        # 新しいユーザーメッセージ（初回ならコンテキスト付き）を追加
                         api_contents.append({"role": "user", "parts": [{"text": first_user_message if is_first_turn else prompt}]})
 
                         response = call_gemini_api(api_contents, system_instruction=SYSTEM_PROMPT_CHAT)
