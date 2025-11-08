@@ -216,7 +216,7 @@ def calculate_characteristic_words(_df, attribute_col, text_col, _stopwords_set)
         characteristic_words.sort(key=lambda x: x[1]); results[attr_value] = characteristic_words[:20]
     return results
 
-# --- ▼ 修正点: D3.js ツリーマップ (Treemap) を描画するHTMLを生成 ---
+# --- D3.js ツリーマップ (Treemap) を描画するHTMLを生成 ---
 def create_treemap_html(json_data_str):
     # D3.js (v7) を使用
     # .replace() 方式で、Pythonの {} と JSの ${} の衝突を回避する
@@ -384,7 +384,6 @@ def create_treemap_html(json_data_str):
     except TypeError:
         json_payload = '{"name": "JSONエラー(Type)", "children": []}'
         
-    # .replace() を使って安全にJSONデータを挿入
     return html_template.replace("__JSON_DATA_PLACEHOLDER__", json_payload)
 # --- ▲ 修正完了 ▲ ---
 
@@ -405,19 +404,30 @@ def generate_wordcloud(_words_list, font_path, _stopwords_set):
             return fig_wc, None
     except Exception as e: return None, f"WordCloud生成失敗: {e}"
 
+# --- ▼ 修正点: ノード数 (most_common) とエッジの太さ (weight) を調整 ---
 # --- 8. 共起ネットワーク生成関数 ---
 def generate_network(_words_df, font_path, _stopwords_set):
     co_occur_counter = Counter()
     for words in _words_df:
         unique_words = sorted(list(set(word for word in words if word not in _stopwords_set)))
         for w1, w2 in combinations(unique_words, 2): co_occur_counter[(w1, w2)] += 1
-    top_pairs = co_occur_counter.most_common(50)
+    
+    # ノード数を増やす (50 -> 70)
+    top_pairs = co_occur_counter.most_common(70) 
+    
     if top_pairs:
         G = nx.Graph()
         for (w1, w2), weight in top_pairs: G.add_edge(w1, w2, weight=weight)
-        fig_net, ax = plt.subplots(figsize=(14, 14)); pos = nx.spring_layout(G, k=0.8, iterations=50)
+        
+        # グラフが密になりすぎるのを防ぐため、サイズとkの値を調整
+        fig_net, ax = plt.subplots(figsize=(16, 16)); # サイズを 14->16 に
+        pos = nx.spring_layout(G, k=0.9, iterations=50) # k=0.8 -> 0.9
+        
         nx.draw_networkx_nodes(G, pos, node_size=2000, node_color='lightblue', alpha=0.8)
-        edge_weights = [d['weight'] * 0.2 for u,v,d in G.edges(data=True)]
+        
+        # エッジの太さを細くする (0.2 -> 0.1)
+        edge_weights = [d['weight'] * 0.1 for u,v,d in G.edges(data=True)] 
+        
         nx.draw_networkx_edges(G, pos, width=edge_weights, alpha=0.4, edge_color='gray')
         labels_kwargs = {'font_size': 10, 'font_family': 'IPAexGothic'} if font_path else {'font_size': 10}
         nx.draw_networkx_labels(G, pos, **labels_kwargs)
@@ -425,6 +435,7 @@ def generate_network(_words_df, font_path, _stopwords_set):
         plt.close(fig_net) # メモリ解放
         return fig_net, None
     return None, "共起ネットワーク生成不可（共起ペア不足）。"
+# --- ▲ 修正完了 ▲ ---
 
 # 単語頻度計算関数
 def calculate_frequency(_words_list, _stopwords_set, top_n=50):
@@ -612,7 +623,7 @@ if uploaded_file:
                         st.session_state.ai_result_simple = call_gemini_api(contents, system_instruction=system_instr_s)
                 st.markdown(st.session_state.ai_result_simple)
 
-            # --- ▼ 修正点: (新設) AI クラスター分析タブ (JSON + D3.js Treemap) ---
+            # --- (修正) AI クラスター分析タブ (JSON + D3.js Treemap) ---
             with tab_cluster:
                 st.subheader("AIによる言説クラスター分析 (Treemap)")
                 st.info("AIがテキストを階層的なトピックに分類し、その構成比（面積）を可視化します。ブロックはマウスオーバーで詳細を確認できます。")
@@ -830,11 +841,11 @@ if uploaded_file:
                         1.  **単語抽出**: WordCloudと同様に、名詞・動詞・形容詞からストップワードと数字を除外した単語リストを使用しました。
                         2.  **共起の定義**: 1つのドキュメント（Excelの1行）内で同時に出現した単語ペアを「共起」として定義しました。
                         3.  **頻度集計**: 全ドキュメントを対象に、共起する単語ペアの出現頻度を集計しました。
-                        4.  **ネットワーク構築**: 共起頻度が高かった上位50ペアを抽出し、`NetworkX` ライブラリを用いてネットワークを構築しました。
-                        5.  **可視化**: 単語をノード（点）、単語間の共起関係をエッジ（線）として描画しました。エッジの太さは共起頻度の高さ（関係の強さ）を反映しています（係数: 0.2）。レイアウトは `spring_layout` を使用しました。
+                        4.  **ネットワーク構築**: 共起頻度が高かった上位70ペアを抽出し、`NetworkX` ライブラリを用いてネットワークを構築しました。(ノード数を70に増やしました)
+                        5.  **可視化**: 単語をノード（点）、単語間の共起関係をエッジ（線）として描画しました。エッジの太さは共起頻度の高さ（関係の強さ）を反映しています（係数: 0.1）。(エッジを細くしました)
                         
                         #### 2. 論文記述例
-                        > ...次に、単語間の関連性を探索するため、共起ネットワーク分析を実施した。分析対象の単語（名詞、動詞、形容詞）が1ドキュメント（行）内で同時に出現した場合を「共起」と定義し、その頻度を集計した。共起頻度上位50ペアに基づきネットワーク（図2）を描画した。
+                        > ...次に、単語間の関連性を探索するため、共起ネットワーク分析を実施した。分析対象の単語（名詞、動詞、形容詞）が1ドキュメント（行）内で同時に出現した場合を「共起」と定義し、その頻度を集計した。共起頻度上位70ペアに基づきネットワーク（図2）を描画した。
                         >
                         > 図2より、[単語A]と[単語B]が強い共起関係（太いエッジ）にあることが確認された。また、[単語C]を中心として[単語D, E, F]がクラスターを形成しており、...といった文脈で語られていることが示唆された。
                     """)
