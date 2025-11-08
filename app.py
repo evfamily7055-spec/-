@@ -19,8 +19,8 @@ import base64 # --- HTMLレポートの画像埋込みのために追加 ---
 from streamlit.components.v1 import html # --- KWIC表示用のhtmlコンポーネント ---
 
 # --- 1. アプリの基本設定 ---
-st.set_page_config(page_title="統計＋AI 統合アナライザー (Sunburst Ver.)", layout="wide")
-st.title("統計＋AI 統合テキストアナライザー 📊🤖 (Sunburst Ver.)")
+st.set_page_config(page_title="統計＋AI 統合アナライザー (Pack Ver.)", layout="wide")
+st.title("統計＋AI 統合テキストアナライザー 📊🤖 (Pack Ver.)")
 st.write("Excelをアップロードし、テキスト列と分析軸（属性）を選択してください。統計分析とAIによる要約・クラスター分析を同時に実行します。")
 
 # --- 2. 形態素解析＆ストップワード設定 (キャッシュ) ---
@@ -216,20 +216,20 @@ def calculate_characteristic_words(_df, attribute_col, text_col, _stopwords_set)
         characteristic_words.sort(key=lambda x: x[1]); results[attr_value] = characteristic_words[:20]
     return results
 
-# --- ▼ 修正点: f-string をやめ、.replace() を使用するように変更 ---
-def create_sunburst_html(json_data_str):
+# --- ▼ 修正点: D3.js パックレイアウト (Circle Packing) を描画するHTMLを生成 ---
+def create_pack_layout_html(json_data_str):
     # D3.js (v7) を使用
-    # f-string (f"") ではなく、通常の文字列 (""") に変更
-    # Pythonの変数を埋め込む箇所を `__JSON_DATA_PLACEHOLDER__` に変更
+    # .replace() 方式で、Pythonの {} と JSの ${} の衝突を回避する
     html_template = """ 
     <!DOCTYPE html>
     <html lang="ja">
     <head>
         <meta charset="UTF-8">
-        <title>Sunburst Chart</title>
+        <title>Pack Layout Chart</title>
         <script src="https://d3js.org/d3.v7.min.js"></script>
         <style>
             body {
+                /* Streamlitのテーマを継承するため、背景色・文字色を指定しない */
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
                 margin: 0;
                 padding: 0;
@@ -248,8 +248,8 @@ def create_sunburst_html(json_data_str):
             }
             #tooltip {
                 position: absolute;
-                background-color: #333;
-                color: #fff;
+                background-color: #333; /* ツールチップは暗い背景で固定 */
+                color: #fff;           /* ツールチップは明るい文字で固定 */
                 padding: 8px 12px;
                 border-radius: 4px;
                 font-size: 14px;
@@ -262,17 +262,27 @@ def create_sunburst_html(json_data_str):
                 display: block;
                 margin: auto;
             }
-            path {
+            circle {
                 cursor: pointer;
             }
-            path:hover {
+            circle:hover {
                 opacity: 0.8;
             }
             text {
                 font-size: 12px;
                 pointer-events: none;
-                fill: #333;
+                fill: #333; /* 円の中の文字は黒（または暗い色）で固定 */
+                text-anchor: middle;
             }
+            /* サブトピック（深さ2）の文字は少し小さく */
+            text.depth-2 {
+                 font-size: 10px;
+            }
+            /* Streamlitダークテーマ対応: textの色を上書き */
+            body[data-theme="dark"] text {
+                 fill: #333; /* ダークテーマでも、円の中の文字は暗い色を維持 */
+            }
+
         </style>
     </head>
     <body>
@@ -284,49 +294,49 @@ def create_sunburst_html(json_data_str):
             const data = __JSON_DATA_PLACEHOLDER__; // .replace() で置換されるプレースホルダー
             const width = Math.min(window.innerWidth, 800); // チャートの幅
             const height = 550; // チャートの高さ
-            const radius = Math.min(width, height) / 2 - 10;
             const color = d3.scaleOrdinal(d3.schemeCategory10);
 
-            // 2. SVGコンテナの作成
+            // 2. 階層データ構造の作成 (d3.pack)
+            // .sum() で value に基づいて円のサイズを決定
+            // .sort() で大きいものが中央に来やすくなる
+            const root = d3.hierarchy(data)
+                .sum(d => d.value)
+                .sort((a, b) => b.value - a.value);
+
+            // 3. パックレイアウトの作成
+            const pack = d3.pack()
+                .size([width - 40, height - 40]) // 少し余白(padding)をもたせる
+                .padding(3);
+                
+            const nodes = pack(root).descendants();
+
+            // 4. SVGコンテナの作成
             const svg = d3.select("#chart").append("svg")
                 .attr("width", width)
                 .attr("height", height)
-                .append("g")
-                .attr("transform", `translate(${width / 2}, ${height / 2})`); // JSの${}はそのまま
+                .attr("viewBox", `0 0 ${width} ${height}`)
+                .attr("style", "max-width: 100%; height: auto;");
 
-            // 3. 階層データ構造の作成
-            const root = d3.hierarchy(data)
-                .sum(d => d.value) // valueを使ってサイズを計算
-                .sort((a, b) => b.value - a.value);
-
-            // 4. パーティションレイアウトの作成
-            const partition = d3.partition()
-                .size([2 * Math.PI, radius]);
-
-            partition(root);
-
-            // 5. Arcジェネレータの作成
-            const arc = d3.arc()
-                .startAngle(d => d.x0)
-                .endAngle(d => d.x1)
-                .innerRadius(d => d.y0)
-                .outerRadius(d => d.y1);
-
-            // 6. ツールチップの選択
+            // 5. ツールチップの選択
             const tooltip = d3.select("#tooltip");
 
-            // 7. パス（扇形）の描画
-            svg.selectAll("path")
-                .data(root.descendants().filter(d => d.depth)) // ルートノード(depth=0)は描画しない
-                .enter().append("path")
-                .attr("d", arc)
-                .style("fill", d => color((d.children ? d : d.parent).data.name))
-                .style("stroke", "#fff")
-                .style("stroke-width", "0.5px")
+            // 6. ノード（円）の描画
+            const node = svg.selectAll("g")
+                .data(nodes)
+                .join("g")
+                .attr("transform", d => `translate(${d.x},${d.y})`);
+
+            node.append("circle")
+                .attr("r", d => d.r)
+                .attr("fill", d => d.depth === 0 ? "#fff" : color(d.depth === 1 ? d.data.name : d.parent.data.name)) // 深さ0(全体)は透明、深さ1(クラスター)で色分け
+                .attr("fill-opacity", d => d.depth === 0 ? 0 : (d.depth === 1 ? 0.4 : 0.8)) // 深さ1を半透明に
+                .attr("stroke", d => d.depth === 0 ? "none" : (d.depth === 1 ? "#999" : color(d.parent.data.name)))
+                .attr("stroke-width", d => d.depth === 1 ? 2 : 1)
                 .on("mouseover", (event, d) => {
+                    if (d.depth === 0) return; // 全体の円はツールチップ不要
                     tooltip.transition().duration(200).style("opacity", .9);
                     let percent = (d.value / root.value * 100).toFixed(1);
-                    tooltip.html(`<b>${d.data.name}</b><br>全体に占める割合: ${percent}%`) // JSの${}はそのまま
+                    tooltip.html(`<b>${d.data.name}</b><br>全体に占める割合: ${percent}%`) 
                         .style("left", (event.pageX + 15) + "px")
                         .style("top", (event.pageY - 28) + "px");
                 })
@@ -334,38 +344,43 @@ def create_sunburst_html(json_data_str):
                     tooltip.transition().duration(500).style("opacity", 0);
                 });
 
-            // 8. ラベルの追加 (オプション: 読みやすさのために調整が必要)
-             svg.selectAll("text")
-                .data(root.descendants().filter(d => d.depth && (d.y0 + d.y1) / 2 * (d.x1 - d.x0) > 10))
-                .enter().append("text")
-                .attr("transform", d => {
-                    const x = (d.x0 + d.x1) / 2 * 180 / Math.PI;
-                    const y = (d.y0 + d.y1) / 2;
-                    return `rotate(${x - 90}) translate(${y},0) rotate(${x < 180 ? 0 : 180})`; // JSの${}はそのまま
+            // 7. ラベルの追加
+            node.append("text")
+                .attr("class", d => `depth-${d.depth}`) // 深さに応じてclassを付与
+                .attr("clip-path", d => `circle(${d.r - 5})`) // 円からはみ出ないようにクリップ
+                .selectAll("tspan")
+                .data(d => {
+                    // ラベルを ( と % で分割して改行処理
+                    if (d.depth === 0) return []; // 全体(root)にはラベル不要
+                    const name = d.data.name;
+                    // (XX.X%) を見つけて分割
+                    const match = name.match(/(.+) \((\d+\.\d+%)\)$/);
+                    if (match && d.r > 20) { // 半径が小さすぎる場合はラベルを表示しない
+                        return [match[1], `(${match[2]})`]; // [トピック名, (XX.X%)]
+                    } else if (d.r > 15) {
+                        return [name];
+                    }
+                    return [];
                 })
-                .attr("dy", "0.35em")
-                .attr("text-anchor", "middle")
-                .style("fill", d => d.depth > 1 ? "#444" : "#000") // サブトピックの文字色を少し薄く
-                .text(d => {
-                     // 長すぎるラベルは省略
-                     const name = d.data.name;
-                     return name.length > 20 ? name.substring(0, 20) + "..." : name;
-                });
+                .join("tspan")
+                .attr("x", 0)
+                .attr("y", (d, i, nodes) => `${i - (nodes.length - 1) * 0.5 + 0.3}em`) // 2行の場合に中央揃え
+                .text(d => d);
 
         </script>
     </body>
     </html>
     """
     
-    # .replace() を使って安全にJSONデータを挿入
-    # AIが生成したJSON文字列 (json_data_str) を一度パース(loads)し、再度シリアライズ(dumps)することで、
-    # JSON文字列内のエスケープ文字(\" や \n)が正しく処理され、JavaScriptエラーを防ぐ。
     try:
         json_payload = json.dumps(json.loads(json_data_str))
     except json.JSONDecodeError:
-        # AIが不正なJSONを返した場合、JSエラーを防ぐため空のデータを渡す
         json_payload = '{"name": "JSONエラー", "children": []}'
+    except TypeError:
+        # json_data_str が None などの場合
+        json_payload = '{"name": "JSONエラー(Type)", "children": []}'
         
+    # .replace() を使って安全にJSONデータを挿入
     return html_template.replace("__JSON_DATA_PLACEHOLDER__", json_payload)
 # --- ▲ 修正完了 ▲ ---
 
@@ -593,10 +608,10 @@ if uploaded_file:
                         st.session_state.ai_result_simple = call_gemini_api(contents, system_instruction=system_instr_s)
                 st.markdown(st.session_state.ai_result_simple)
 
-            # --- (新設) AI クラスター分析タブ (JSON + D3.js) ---
+            # --- (新設) AI クラスター分析タブ (JSON + D3.js Pack Layout) ---
             with tab_cluster:
-                st.subheader("AIによる言説クラスター分析 (Sunburst)")
-                st.info("AIがテキストを階層的なトピックに分類し、その構成比を可視化します。円グラフはマウスオーバーで操作できます。")
+                st.subheader("AIによる言説クラスター分析 (Pack Layout)")
+                st.info("AIがテキストを階層的なトピックに分類し、その構成比（円の面積）を可視化します。円はマウスオーバーで詳細を確認できます。")
 
                 # 1. JSONデータの生成 (キャッシュ確認)
                 if 'ai_result_cluster_json' not in st.session_state:
@@ -667,24 +682,26 @@ if uploaded_file:
                 if 'ai_result_cluster_json' in st.session_state:
                     json_data_str = st.session_state.ai_result_cluster_json
                     try:
-                        # JSONが有効かどうかの簡易チェック
-                        json.loads(json_data_str) 
-                        
-                        st.subheader("トピック構成 (Sunburst)")
-                        sunburst_html_content = create_sunburst_html(json_data_str)
-                        html(sunburst_html_content, height=600, scrolling=False)
-                        
-                        if 'ai_result_cluster_text' in st.session_state:
-                            st.subheader("AIによるクラスターの解釈")
-                            st.markdown(st.session_state.ai_result_cluster_text)
+                        if not json_data_str or json_data_str.strip() == "":
+                            st.error("AIがクラスター分析用のJSONデータを生成できませんでした。")
                         else:
-                            st.info("クラスターの解釈を生成中です...")
+                            json.loads(json_data_str) # パースチェック
+                            
+                            st.subheader("トピック構成 (Pack Layout)")
+                            pack_layout_html_content = create_pack_layout_html(json_data_str)
+                            html(pack_layout_html_content, height=600, scrolling=False)
+                            
+                            if 'ai_result_cluster_text' in st.session_state:
+                                st.subheader("AIによるクラスターの解釈")
+                                st.markdown(st.session_state.ai_result_cluster_text)
+                            else:
+                                st.info("クラスターの解釈を生成中です...")
                             
                     except json.JSONDecodeError:
                         st.error("AIによるJSON生成に失敗しました。AIが有効なJSONを返せませんでした。")
                         st.text_area("AIの生レスポンス (エラー)", json_data_str, height=200)
                     except Exception as e:
-                        st.error(f"Sunburstチャートの描画エラー: {e}")
+                        st.error(f"Pack Layoutチャートの描画エラー: {e}")
                         st.text_area("AIのJSONレスポンス", json_data_str, height=200)
                 else:
                     st.info("クラスター分析データを生成中です...")
