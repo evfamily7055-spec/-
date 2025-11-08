@@ -4,7 +4,6 @@ import re
 import requests # Gemini API呼び出し用
 import time # リトライ用
 import json # --- D3.js連携 / AI JSONパースのために追加 ---
-import squarify # --- ▼ Treemap描画のために追加 ---
 from janome.tokenizer import Tokenizer
 from wordcloud import WordCloud
 import networkx as nx
@@ -20,8 +19,8 @@ import base64 # --- HTMLレポートの画像埋込みのために追加 ---
 from streamlit.components.v1 import html # --- KWIC表示用のhtmlコンポーネント ---
 
 # --- 1. アプリの基本設定 ---
-st.set_page_config(page_title="統計＋AI 統合アナライザー (Treemap V2)", layout="wide")
-st.title("統計＋AI 統合テキストアナライザー 📊🤖 (Treemap V2)")
+st.set_page_config(page_title="統計＋AI 統合アナライザー ", layout="wide")
+st.title("統計＋AI 統合テキストアナライザー 📊🤖")
 st.write("Excelをアップロードし、テキスト列と分析軸（属性）を選択してください。統計分析とAIによる要約・クラスター分析を同時に実行します。")
 
 # --- 2. 形態素解析＆ストップワード設定 (キャッシュ) ---
@@ -120,7 +119,6 @@ SYSTEM_PROMPT_CLUSTER_JSON = """あなたは高度なテキストクラスタリ
 """
 
 # 4. クラスター分析 (テキスト解釈用) のシステムプロンプト
-# --- ▼ 修正点: AIに「凡例」の生成を指示 ---
 SYSTEM_PROMPT_CLUSTER_TEXT = """あなたはテキストアナリストです。以下のJSONは、テキストデータをクラスター分析した結果です。
 {analysis_scope_instruction}
 
@@ -128,20 +126,9 @@ SYSTEM_PROMPT_CLUSTER_TEXT = """あなたはテキストアナリストです。
 {json_data}
 
 [あなたのタスク]
-このJSONデータを解釈し、分析結果をマークダウン形式で分かりやすく説明してください。
-**必ず以下の構成に従ってください。**
-
-## 凡例 (色と主要クラスター)
-（グラフの各色（例: 薄い青、薄い緑など）が、どの主要クラスターに対応しているかをリスト形式で説明してください。**色は `Set3` カラーマップの順番です。**）
-- [色1 (例: 薄い緑)]: [クラスターAの名前]
-- [色2 (例: 薄いオレンジ)]: [クラスターBの名前]
-- [色3 (例: 薄い青)]: [クラスターCの名前]
-...
-
-## AIによるクラスターの解釈
-（次に、各主要クラスターがどのような意見グループなのかを詳細に説明してください。サブトピックにも触れながら、なぜそのように分類されたのかを具体的に考察してください。）
+このJSONデータを解釈し、各主要クラスター（`children`の第一階層）がどのような意見グループなのかを、**概要テキスト**としてマークダウン形式で分かりやすく説明してください。
+サブトピック（`children`の第二階層）にも触れながら、なぜそのように分類されたのかを具体的に考察してください。
 """
-# --- ▲ 修正完了 ▲ ---
 
 
 # 5. 会話用プロンプト (可変)
@@ -229,71 +216,154 @@ def calculate_characteristic_words(_df, attribute_col, text_col, _stopwords_set)
         characteristic_words.sort(key=lambda x: x[1]); results[attr_value] = characteristic_words[:20]
     return results
 
-# --- ▼ 修正点: `squarify` (matplotlib) を使ったTreemap描画関数 ---
-# (HTML/D3.js の `create_treemap_html` は削除)
-def create_treemap_figure(json_data_str):
-    try:
-        data = json.loads(json_data_str)
-        if 'children' not in data or not data['children']:
-            return None, "JSONデータに有効な 'children' (クラスター) が見つかりません。"
-    except json.JSONDecodeError:
-        return None, "AIが生成したJSONの解析に失敗しました。"
-    except TypeError:
-         return None, "AIの応答が空または不正です。"
+# --- ▼ 修正点: CSSをダークテーマ対応に変更 ---
+def create_sunburst_html(json_data_str):
+    # D3.js (v7) を使用
+    # .replace() 方式で、Pythonの {} と JSの ${} の衝突を回避する
+    html_template = """ 
+    <!DOCTYPE html>
+    <html lang="ja">
+    <head>
+        <meta charset="UTF-8">
+        <title>Sunburst Chart</title>
+        <script src="https://d3js.org/d3.v7.min.js"></script>
+        <style>
+            body {
+                /* Streamlitのテーマを継承するため、背景色・文字色を指定しない */
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                margin: 0;
+                padding: 0;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                width: 100%;
+                height: 600px;
+                overflow: hidden;
+            }
+            #chart {
+                width: 100%;
+                height: 550px;
+                position: relative;
+            }
+            #tooltip {
+                position: absolute;
+                background-color: #333; /* ツールチップは暗い背景で固定 */
+                color: #fff;           /* ツールチップは明るい文字で固定 */
+                padding: 8px 12px;
+                border-radius: 4px;
+                font-size: 14px;
+                pointer-events: none;
+                opacity: 0;
+                transition: opacity 0.2s;
+                white-space: nowrap;
+            }
+            svg {
+                display: block;
+                margin: auto;
+            }
+            path {
+                cursor: pointer;
+            }
+            path:hover {
+                opacity: 0.8;
+            }
+            text {
+                font-size: 12px;
+                pointer-events: none;
+                fill: inherit; /* Streamlitのテーマ(body)から文字色を継承 */
+            }
+        </style>
+    </head>
+    <body>
+        <div id="chart"></div>
+        <div id="tooltip"></div>
 
-    sizes = []
-    labels = []
-    color_list = []
+        <script>
+            // 1. データと設定
+            const data = __JSON_DATA_PLACEHOLDER__; // .replace() で置換されるプレースホルダー
+            const width = Math.min(window.innerWidth, 800); // チャートの幅
+            const height = 550; // チャートの高さ
+            const radius = Math.min(width, height) / 2 - 10;
+            const color = d3.scaleOrdinal(d3.schemeCategory10);
+
+            // 2. SVGコンテナの作成
+            const svg = d3.select("#chart").append("svg")
+                .attr("width", width)
+                .attr("height", height)
+                .append("g")
+                .attr("transform", `translate(${width / 2}, ${height / 2})`); 
+
+            // 3. 階層データ構造の作成
+            const root = d3.hierarchy(data)
+                .sum(d => d.value) 
+                .sort((a, b) => b.value - a.value);
+
+            // 4. パーティションレイアウトの作成
+            const partition = d3.partition()
+                .size([2 * Math.PI, radius]);
+
+            partition(root);
+
+            // 5. Arcジェネレータの作成
+            const arc = d3.arc()
+                .startAngle(d => d.x0)
+                .endAngle(d => d.x1)
+                .innerRadius(d => d.y0)
+                .outerRadius(d => d.y1);
+
+            // 6. ツールチップの選択
+            const tooltip = d3.select("#tooltip");
+
+            // 7. パス（扇形）の描画
+            svg.selectAll("path")
+                .data(root.descendants().filter(d => d.depth)) 
+                .enter().append("path")
+                .attr("d", arc)
+                .style("fill", d => color((d.children ? d : d.parent).data.name))
+                .style("stroke", "#fff") // 境界線は白で固定
+                .style("stroke-width", "0.5px")
+                .on("mouseover", (event, d) => {
+                    tooltip.transition().duration(200).style("opacity", .9);
+                    let percent = (d.value / root.value * 100).toFixed(1);
+                    tooltip.html(`<b>${d.data.name}</b><br>全体に占める割合: ${percent}%`) 
+                        .style("left", (event.pageX + 15) + "px")
+                        .style("top", (event.pageY - 28) + "px");
+                })
+                .on("mouseout", () => {
+                    tooltip.transition().duration(500).style("opacity", 0);
+                });
+
+            // 8. ラベルの追加
+             svg.selectAll("text")
+                .data(root.descendants().filter(d => d.depth && (d.y0 + d.y1) / 2 * (d.x1 - d.x0) > 10))
+                .enter().append("text")
+                .attr("transform", d => {
+                    const x = (d.x0 + d.x1) / 2 * 180 / Math.PI;
+                    const y = (d.y0 + d.y1) / 2;
+                    return `rotate(${x - 90}) translate(${y},0) rotate(${x < 180 ? 0 : 180})`; 
+                })
+                .attr("dy", "0.35em")
+                .attr("text-anchor", "middle")
+                // .style("fill", d => d.depth > 1 ? "#444" : "#000") // fill: inherit; に任せる
+                .text(d => {
+                     // ラベルの文字数制限を少し緩和 (20 -> 30)
+                     const name = d.data.name;
+                     return name.length > 30 ? name.substring(0, 30) + "..." : name;
+                });
+
+        </script>
+    </body>
+    </html>
+    """
     
-    # --- ▼ 修正点: 色を "tab10" から "Set3" (パステルカラー) に変更 ---
-    cmap = plt.get_cmap("Set3")
-    cluster_colors = {}
-    color_index = 0
-
-    for cluster in data.get('children', []):
-        cluster_name = cluster.get('name', '不明なクラスター')
-        
-        if cluster_name not in cluster_colors:
-            cluster_colors[cluster_name] = cmap(color_index % 12) # Set3は12色
-            color_index += 1
-        cluster_color = cluster_colors[cluster_name]
-        
-        sub_topics = cluster.get('children', [])
-        if not sub_topics:
-            continue # スキーマ通りならサブトピックがあるはず
-        else:
-            for sub_topic in sub_topics:
-                sub_value = sub_topic.get('value', 0)
-                if sub_value > 0: 
-                    sizes.append(sub_value)
-                    labels.append(sub_topic.get('name', '不明なトピック'))
-                    color_list.append(cluster_color) 
-
-    if not sizes:
-        return None, "描画対象となるサブトピック（value > 0）が見つかりませんでした。"
-
     try:
-        fig, ax = plt.subplots(figsize=(16, 9))
+        json_payload = json.dumps(json.loads(json_data_str))
+    except json.JSONDecodeError:
+        json_payload = '{"name": "JSONエラー", "children": []}'
         
-        # --- ▼ 修正点: 輪郭(edgecolor)と文字(text_kwargs)を調整 ---
-        squarify.plot(
-            sizes=sizes, 
-            label=labels, 
-            color=color_list, 
-            ax=ax,
-            edgecolor="white", # 輪郭を白に
-            linewidth=2,       # 輪郭の太さを2に
-            text_kwargs={'color':'#222222', 'fontsize':10, 'wrap':True} # 文字を濃いグレーに、自動折り返し
-        )
-        # --- ▲ 修正完了 ▲ ---
-        
-        ax.set_title("トピック構成 (Treemap)", fontsize=18)
-        ax.axis('off')
-        
-        plt.close(fig) # メモリ解放
-        return fig, None
-    except Exception as e:
-        return None, f"Treemap描画中にエラーが発生: {e}"
+    # .replace() を使って安全にJSONデータを挿入
+    return html_template.replace("__JSON_DATA_PLACEHOLDER__", json_payload)
 # --- ▲ 修正完了 ▲ ---
 
 
@@ -319,20 +389,13 @@ def generate_network(_words_df, font_path, _stopwords_set):
     for words in _words_df:
         unique_words = sorted(list(set(word for word in words if word not in _stopwords_set)))
         for w1, w2 in combinations(unique_words, 2): co_occur_counter[(w1, w2)] += 1
-    
-    top_pairs = co_occur_counter.most_common(70) 
-    
+    top_pairs = co_occur_counter.most_common(50)
     if top_pairs:
         G = nx.Graph()
         for (w1, w2), weight in top_pairs: G.add_edge(w1, w2, weight=weight)
-        
-        fig_net, ax = plt.subplots(figsize=(16, 16)); 
-        pos = nx.spring_layout(G, k=0.9, iterations=50) 
-        
+        fig_net, ax = plt.subplots(figsize=(14, 14)); pos = nx.spring_layout(G, k=0.8, iterations=50)
         nx.draw_networkx_nodes(G, pos, node_size=2000, node_color='lightblue', alpha=0.8)
-        
-        edge_weights = [d['weight'] * 0.1 for u,v,d in G.edges(data=True)] 
-        
+        edge_weights = [d['weight'] * 0.2 for u,v,d in G.edges(data=True)]
         nx.draw_networkx_edges(G, pos, width=edge_weights, alpha=0.4, edge_color='gray')
         labels_kwargs = {'font_size': 10, 'font_family': 'IPAexGothic'} if font_path else {'font_size': 10}
         nx.draw_networkx_labels(G, pos, **labels_kwargs)
@@ -361,12 +424,7 @@ def generate_html_report():
     html_parts.append("<style>body{font-family:sans-serif;margin:20px}h1,h2,h3{color:#333;border-bottom:1px solid #ccc;padding-bottom:5px}h2{margin-top:30px}.result-section{margin-bottom:30px;padding:15px;border:1px solid #eee;border-radius:5px;background-color:#f9f9f9}img{max-width:100%;height:auto;border:1px solid #ddd;margin-top:10px}table{border-collapse:collapse;width:100%;margin-top:10px}th,td{border:1px solid #ddd;padding:8px;text-align:left}th{background-color:#f2f2f2}pre{background-color:#eee;padding:10px;border-radius:3px;white-space:pre-wrap;word-wrap:break-word}</style>")
     html_parts.append("</head><body><h1>テキスト分析レポート</h1>")
     if 'ai_result_simple' in st.session_state: html_parts.append(f"<div class='result-section'><h2>🤖 AI サマリー (簡易)</h2><pre>{st.session_state.ai_result_simple}</pre></div>")
-    
-    if 'fig_treemap_display' in st.session_state and st.session_state.fig_treemap_display:
-        img_base64 = fig_to_base64_png(st.session_state.fig_treemap_display);
-        if img_base64: html_parts.append(f"<div class='result-section'><h2>📊 AI クラスター分析 (Treemap)</h2><img src='{img_base64}' alt='Treemap'></div>")
     if 'ai_result_cluster_text' in st.session_state: html_parts.append(f"<div class='result-section'><h2>📊 AI クラスター分析 (解釈)</h2><pre>{st.session_state.ai_result_cluster_text}</pre></div>")
-
     if 'fig_wc_display' in st.session_state and st.session_state.fig_wc_display:
         img_base64 = fig_to_base64_png(st.session_state.fig_wc_display);
         if img_base64: html_parts.append(f"<div class='result-section'><h2>☁️ WordCloud (全体)</h2><img src='{img_base64}' alt='WordCloud Overall'></div>")
@@ -435,8 +493,6 @@ if uploaded_file:
                         st.session_state.pop('ai_result_simple', None); st.session_state.pop('ai_result_academic', None)
                         st.session_state.pop('ai_result_cluster_json', None)
                         st.session_state.pop('ai_result_cluster_text', None)
-                        st.session_state.pop('fig_treemap_display', None) 
-                        st.session_state.pop('treemap_error_display', None)
                         st.session_state.pop('fig_wc_display', None); st.session_state.pop('wc_error_display', None)
                         st.session_state.pop('fig_net_display', None); st.session_state.pop('net_error_display', None)
                         st.session_state.pop('chi2_results_display', None); st.session_state.pop('chi2_error_display', None)
@@ -523,7 +579,7 @@ if uploaded_file:
 
                         contents = [{"parts": [{"text": ai_input_text}]}]
                         has_attr = bool(attribute_columns)
-                        has_attribute_str_s = "## 6. 属性別の傾向 (もしあれば)\n(属性ごとの特徴的な意見を比較)" if has_attr else ""
+                        has_attribute_str_s = "## 6. 属性別の傾向 \n(属性ごとの特徴的な意見を比較)" if has_attr else ""
                         attr_instr_s = "データは「属性 || テキスト」の形式です。属性ごとの傾向や違いにも着目して分析してください。" if has_attr else ""
                         
                         system_instr_s = SYSTEM_PROMPT_SIMPLE.format(
@@ -534,16 +590,14 @@ if uploaded_file:
                         st.session_state.ai_result_simple = call_gemini_api(contents, system_instruction=system_instr_s)
                 st.markdown(st.session_state.ai_result_simple)
 
-            # --- ▼ 修正点: (新設) AI クラスター分析タブ (JSON + Matplotlib/squarify) ---
+            # --- (新設) AI クラスター分析タブ (JSON + D3.js) ---
             with tab_cluster:
-                st.subheader("AIによる言説クラスター分析 (Treemap)")
-                # --- ▼ 修正点: 凡例は下に表示される旨を記載 ---
-                st.info("AIがテキストを階層的なトピックに分類し、その構成比（面積）を可視化します。色の凡例と解釈は、グラフの下に表示されます。")
-                # --- ▲ 修正完了 ▲ ---
+                st.subheader("AIによる言説クラスター分析 (Sunburst)")
+                st.info("AIがテキストを階層的なトピックに分類し、その構成比を可視化します。円グラフはマウスオーバーで操作できます。")
 
                 # 1. JSONデータの生成 (キャッシュ確認)
                 if 'ai_result_cluster_json' not in st.session_state:
-                    with st.spinner("AIによるクラスターJSONを生成中... (ステップ1/3)"):
+                    with st.spinner("AIによるクラスターJSONを生成中... (ステップ1/2)"):
                         if analyzed_items < total_items: st.warning(analysis_scope_warning, icon="⚠️")
                         else: st.info(analysis_scope_warning, icon="✅")
 
@@ -594,7 +648,7 @@ if uploaded_file:
 
                 # 2. テキスト解釈の生成 (キャッシュ確認)
                 if 'ai_result_cluster_text' not in st.session_state and 'ai_result_cluster_json' in st.session_state:
-                     with st.spinner("AIによるクラスターの解釈を生成中... (ステップ2/3)"):
+                     with st.spinner("AIによるクラスターの解釈を生成中... (ステップ2/2)"):
                         json_str = st.session_state.ai_result_cluster_json
                         
                         system_instr_text = SYSTEM_PROMPT_CLUSTER_TEXT.format(
@@ -605,37 +659,35 @@ if uploaded_file:
                         
                         text_summary = call_gemini_api(contents_text, system_instruction=system_instr_text)
                         st.session_state.ai_result_cluster_text = text_summary
-                
-                # 3. Treemap (Matplotlib/Squarify) の描画 (キャッシュ確認)
-                if 'fig_treemap_display' not in st.session_state and 'ai_result_cluster_json' in st.session_state:
-                    with st.spinner("Treemapを生成中... (ステップ3/3)"):
-                        json_data_str = st.session_state.ai_result_cluster_json
-                        fig_treemap, treemap_error = create_treemap_figure(json_data_str)
-                        st.session_state.fig_treemap_display = fig_treemap
-                        st.session_state.treemap_error_display = treemap_error
 
-                # 4. 描画とテキスト表示
-                if 'fig_treemap_display' in st.session_state and st.session_state.fig_treemap_display:
-                    st.subheader("トピック構成 (Treemap)")
-                    fig_treemap = st.session_state.fig_treemap_display
-                    st.pyplot(fig_treemap)
-                    
-                    img_bytes = fig_to_bytes(fig_treemap)
-                    if img_bytes: st.download_button("この画像をダウンロード (PNG)", img_bytes, "treemap.png", "image/png")
-
-                    if 'ai_result_cluster_text' in st.session_state:
-                        # 凡例と解釈はAIの応答に任せる
-                        st.markdown(st.session_state.ai_result_cluster_text)
-                    else:
-                        st.info("クラスターの解釈を生成中です...")
-                
-                elif 'treemap_error_display' in st.session_state:
-                    st.error(st.session_state.treemap_error_display)
-                    if 'ai_result_cluster_json' in st.session_state:
-                         st.text_area("AIのJSONレスポンス", st.session_state.ai_result_cluster_json, height=200)
+                # 3. D3.jsによる描画とテキスト表示
+                if 'ai_result_cluster_json' in st.session_state:
+                    json_data_str = st.session_state.ai_result_cluster_json
+                    try:
+                        # JSONが有効かどうかの簡易チェック (AIが空や不正な文字列を返さないか)
+                        if not json_data_str or json_data_str.strip() == "":
+                            st.error("AIがクラスター分析用のJSONデータを生成できませんでした。")
+                        else:
+                            json.loads(json_data_str) # ここでパースに失敗すると except json.JSONDecodeError へ
+                            
+                            st.subheader("トピック構成 (Sunburst)")
+                            sunburst_html_content = create_sunburst_html(json_data_str)
+                            html(sunburst_html_content, height=600, scrolling=False)
+                            
+                            if 'ai_result_cluster_text' in st.session_state:
+                                st.subheader("AIによるクラスターの解釈")
+                                st.markdown(st.session_state.ai_result_cluster_text)
+                            else:
+                                st.info("クラスターの解釈を生成中です...")
+                            
+                    except json.JSONDecodeError:
+                        st.error("AIによるJSON生成に失敗しました。AIが有効なJSONを返せませんでした。")
+                        st.text_area("AIの生レスポンス (エラー)", json_data_str, height=200)
+                    except Exception as e:
+                        st.error(f"Sunburstチャートの描画エラー: {e}")
+                        st.text_area("AIのJSONレスポンス", json_data_str, height=200)
                 else:
                     st.info("クラスター分析データを生成中です...")
-            # --- ▲ 修正完了 ▲ ---
             
             # --- Tab 2: WordCloud --- (tab2 に変更)
             with tab2:
@@ -756,11 +808,11 @@ if uploaded_file:
                         1.  **単語抽出**: WordCloudと同様に、名詞・動詞・形容詞からストップワードと数字を除外した単語リストを使用しました。
                         2.  **共起の定義**: 1つのドキュメント（Excelの1行）内で同時に出現した単語ペアを「共起」として定義しました。
                         3.  **頻度集計**: 全ドキュメントを対象に、共起する単語ペアの出現頻度を集計しました。
-                        4.  **ネットワーク構築**: 共起頻度が高かった上位70ペアを抽出し、`NetworkX` ライブラリを用いてネットワークを構築しました。(ノード数を70に増やしました)
-                        5.  **可視化**: 単語をノード（点）、単語間の共起関係をエッジ（線）として描画しました。エッジの太さは共起頻度の高さ（関係の強さ）を反映しています（係数: 0.1）。(エッジを細くしました)
+                        4.  **ネットワーク構築**: 共起頻度が高かった上位50ペアを抽出し、`NetworkX` ライブラリを用いてネットワークを構築しました。
+                        5.  **可視化**: 単語をノード（点）、単語間の共起関係をエッジ（線）として描画しました。エッジの太さは共起頻度の高さ（関係の強さ）を反映しています（係数: 0.2）。レイアウトは `spring_layout` を使用しました。
                         
                         #### 2. 論文記述例
-                        > ...次に、単語間の関連性を探索するため、共起ネットワーク分析を実施した。分析対象の単語（名詞、動詞、形容詞）が1ドキュメント（行）内で同時に出現した場合を「共起」と定義し、その頻度を集計した。共起頻度上位70ペアに基づきネットワーク（図2）を描画した。
+                        > ...次に、単語間の関連性を探索するため、共起ネットワーク分析を実施した。分析対象の単語（名詞、動詞、形容詞）が1ドキュメント（行）内で同時に出現した場合を「共起」と定義し、その頻度を集計した。共起頻度上位50ペアに基づきネットワーク（図2）を描画した。
                         >
                         > 図2より、[単語A]と[単語B]が強い共起関係（太いエッジ）にあることが確認された。また、[単語C]を中心として[単語D, E, F]がクラスターを形成しており、...といった文脈で語られていることが示唆された。
                     """)
