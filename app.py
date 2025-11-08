@@ -4,6 +4,7 @@ import re
 import requests # Gemini API呼び出し用
 import time # リトライ用
 import json # --- D3.js連携 / AI JSONパースのために追加 ---
+import squarify # --- ▼ Treemap描画のために追加 ---
 from janome.tokenizer import Tokenizer
 from wordcloud import WordCloud
 import networkx as nx
@@ -19,8 +20,8 @@ import base64 # --- HTMLレポートの画像埋込みのために追加 ---
 from streamlit.components.v1 import html # --- KWIC表示用のhtmlコンポーネント ---
 
 # --- 1. アプリの基本設定 ---
-st.set_page_config(page_title="統計＋AI 統合アナライザー ", layout="wide")
-st.title("統計＋AI 統合テキストアナライザー 📊🤖")
+st.set_page_config(page_title="統計＋AI 統合アナライザー (Treemap V2)", layout="wide")
+st.title("統計＋AI 統合テキストアナライザー 📊🤖 (Treemap V2)")
 st.write("Excelをアップロードし、テキスト列と分析軸（属性）を選択してください。統計分析とAIによる要約・クラスター分析を同時に実行します。")
 
 # --- 2. 形態素解析＆ストップワード設定 (キャッシュ) ---
@@ -57,29 +58,45 @@ def extract_words(text, _tokenizer): # _tokenizer引数はキャッシュのキ�
 # --- 3. Gemini AI 分析関数 (会話対応版) ---
 
 # 1. シンプルな要約プロンプト (固定)
-SYSTEM_PROMPT_SIMPLE = """あなたは、テキストマイニングの専門家です。与えられたテキスト群を分析し、結果を詳細かつ分かりやすくマークダウン形式で出力してください。
-データは `[行番号: XX] [属性...] || テキスト` の形式で提供されます。
+SYSTEM_PROMPT_SIMPLE = """あなたは、テキストマイニングの専門家です。
+与えられた[分析対象テキスト]と、AIによる[クラスター分析結果JSON]の両方を参照し、分析サマリーをマークダウン形式で出力してください。
+
+[クラスター分析結果JSON]
+{cluster_json_data}
+
+[あなたのタスク]
 {analysis_scope_instruction}
 {attributeInstruction}
+
 ## 1. 分析サマリー
 (全体の傾向を簡潔に要約)
+
 ## 2. 主要なテーマ
-(頻出するトピックや意見のカテゴリを3〜5個提示してください。**可能であれば、それぞれのテーマがおおよそ何件の意見に基づいているか（件数や割合）にも言及してください**。)
+(**重要**: このセクションは、**上記[クラスター分析結果JSON]に厳密に従って**記述してください。JSONの `children` (主要クラスター) をリストアップし、その内容（サブトピック）を簡潔に説明してください。)
+
 ## 3. ポジティブな意見
-(具体的な良い点を引用しつつリストアップしてください。**引用する際は、[行番号: XX] も含めてください。**)
+(与えられた[分析対象テキスト]全体から、具体的な良い点を引用しつつリストアップしてください。**引用する際は、[行番号: XX] も含めてください。**)
+
 ## 4. ネガティブな意見・課題
-(具体的な不満や改善点を引用しつつリストアップしてください。**引用する際は、[行番号: XX] も含めてください。**)
+(与えられた[分析対象テキスト]全体から、具体的な不満や改善点を引用しつつリストアップしてください。**引用する際は、[行番号: XX] も含めてください。**)
+
 ## 5. 少数だが注目すべき意見
-(件数は少ない（例: 1〜2件）かもしれないが、非常に重要、ユニーク、または示唆に富む意見があれば、ここに抽出してください。**引用する際は、[行番号: XX] も含めてください。**)
+(与えられた[分析対象テキスト]全体から、件数は少ない（例: 1〜2件）かもしれないが、非常に重要、ユニーク、または示唆に富む意見があれば、ここに抽出してください。**引用する際は、[行番号: XX] も含めてください。**)
+
 {has_attribute}
+
 ## 7. 総評とネクストアクション
 (分析から言えること、次に行うべきアクションを提案)
 """
 
 # 2. 学術論文用プロンプト (固定)
 SYSTEM_PROMPT_ACADEMIC = """あなたは、テキストデータを分析する計量テキスト分析（テキストマイニング）の専門家です。
-与えられたテキスト群を分析し、その結果を学術論文の「結果」および「考察」セクションに記述するのに適した、客観的かつフォーマルな文体で出力してください。
-データは `[行番号: XX] [属性...] || テキスト` の形式で提供されます。
+与えられた[分析対象テキスト]と、AIによる[クラスター分析結果JSON]の両方を参照し、学術論文形式で出力してください。
+
+[クラスター分析結果JSON]
+{cluster_json_data}
+
+[あなたのタスク]
 {analysis_scope_instruction}
 {attributeInstruction}
 以下の構成に従って、マークダウン形式で記述してください。
@@ -88,7 +105,7 @@ SYSTEM_PROMPT_ACADEMIC = """あなたは、テキストデータを分析する�
 (データ全体の主要な傾向や特筆すべき点を、客観的な要約として2〜3文で記述する)
 
 ## 2. 主要な知見 (Key Findings)
-(データから抽出された主要なテーマやトピック、頻出する意見のカテゴリを3〜5点、箇条書きで提示する。**可能であれば、それぞれのテーマがおおよそ何件の意見に基づいているか（件数や割合）にも言及し**、具体的なテキスト断片を「」で引用して所見を補強する。**引用する際は、[行番号: XX] も含めること。**)
+(**重要**: このセクションは、**上記[クラスター分析結果JSON]に厳密に従って**記述してください。JSONの `children` (主要クラスター) を主要な知見として取り上げ、その内容（サブトピック）と割合について客観的に記述する。**引用する際は、[行番号: XX] も含めること。**)
 
 ## 3. その他の注目すべき所見 (Other Notable Findings)
 (頻度は低い（例: 1〜2件）ものの、分析上見過ごすべきではない特異な意見、または将来の課題を示唆するような意見があれば、ここに記述する。**引用する際は、[行番号: XX] も含めること。**)
@@ -126,8 +143,18 @@ SYSTEM_PROMPT_CLUSTER_TEXT = """あなたはテキストアナリストです。
 {json_data}
 
 [あなたのタスク]
-このJSONデータを解釈し、各主要クラスター（`children`の第一階層）がどのような意見グループなのかを、**概要テキスト**としてマークダウン形式で分かりやすく説明してください。
-サブトピック（`children`の第二階層）にも触れながら、なぜそのように分類されたのかを具体的に考察してください。
+このJSONデータを解釈し、分析結果をマークダウン形式で分かりやすく説明してください。
+**必ず以下の構成に従ってください。**
+
+## 凡例 (色と主要クラスター)
+（グラフの各色（例: 薄い緑、薄いオレンジなど）が、どの主要クラスターに対応しているかをリスト形式で説明してください。**色は `Set3` カラーマップの順番です。**）
+- [色1 (例: 薄い緑)]: [クラスターAの名前]
+- [色2 (例: 薄いオレンジ)]: [クラスターBの名前]
+- [色3 (例: 薄い青)]: [クラスターCの名前]
+...
+
+## AIによるクラスターの解釈
+（次に、各主要クラスターがどのような意見グループなのかを詳細に説明してください。サブトピックにも触れながら、なぜそのように分類されたのかを具体的に考察してください。）
 """
 
 
@@ -137,6 +164,19 @@ SYSTEM_PROMPT_CHAT = """あなたは、与えられたテキストデータ（�
 ユーザーからの質問に対し、提供されたコンテキスト情報に基づいて、簡潔かつ的確に回答してください。
 コンテキストに含まれていない情報については、その旨を正直に伝えてください。
 """
+
+# 6. 感情分析 (JSON生成用) のシステムプロンプト
+SYSTEM_PROMPT_SENTIMENT_JSON = """あなたは高度な感情分析専門のアナリストです。
+{analysis_scope_instruction}
+
+[タスク]
+1. 提供された[分析対象テキスト]の全件を読み込みます。
+2. 各テキストが「ポジティブ」「ネガティブ」「中立」のどれに該当するかを分類します。
+3. 最終的に、3つのカテゴリそれぞれの**合計件数 (count)** と、分析対象データ全体（{analyzed_items}件）に占める**割合 (percentage)** を計算します。
+4. **重要**: `count` の合計は、分析対象の総件数 {analyzed_items} 件と一致する必要があります。
+5. **重要**: 出力は、指定されたJSONスキーマに厳密に従ってください。
+"""
+
 
 def call_gemini_api(contents, system_instruction=None, generation_config=None):
     try: apiKey = st.secrets["GEMINI_API_KEY"]
@@ -216,155 +256,127 @@ def calculate_characteristic_words(_df, attribute_col, text_col, _stopwords_set)
         characteristic_words.sort(key=lambda x: x[1]); results[attr_value] = characteristic_words[:20]
     return results
 
-# --- ▼ 修正点: CSSをダークテーマ対応に変更 ---
-def create_sunburst_html(json_data_str):
-    # D3.js (v7) を使用
-    # .replace() 方式で、Pythonの {} と JSの ${} の衝突を回避する
-    html_template = """ 
-    <!DOCTYPE html>
-    <html lang="ja">
-    <head>
-        <meta charset="UTF-8">
-        <title>Sunburst Chart</title>
-        <script src="https://d3js.org/d3.v7.min.js"></script>
-        <style>
-            body {
-                /* Streamlitのテーマを継承するため、背景色・文字色を指定しない */
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-                margin: 0;
-                padding: 0;
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                width: 100%;
-                height: 600px;
-                overflow: hidden;
-            }
-            #chart {
-                width: 100%;
-                height: 550px;
-                position: relative;
-            }
-            #tooltip {
-                position: absolute;
-                background-color: #333; /* ツールチップは暗い背景で固定 */
-                color: #fff;           /* ツールチップは明るい文字で固定 */
-                padding: 8px 12px;
-                border-radius: 4px;
-                font-size: 14px;
-                pointer-events: none;
-                opacity: 0;
-                transition: opacity 0.2s;
-                white-space: nowrap;
-            }
-            svg {
-                display: block;
-                margin: auto;
-            }
-            path {
-                cursor: pointer;
-            }
-            path:hover {
-                opacity: 0.8;
-            }
-            text {
-                font-size: 12px;
-                pointer-events: none;
-                fill: inherit; /* Streamlitのテーマ(body)から文字色を継承 */
-            }
-        </style>
-    </head>
-    <body>
-        <div id="chart"></div>
-        <div id="tooltip"></div>
-
-        <script>
-            // 1. データと設定
-            const data = __JSON_DATA_PLACEHOLDER__; // .replace() で置換されるプレースホルダー
-            const width = Math.min(window.innerWidth, 800); // チャートの幅
-            const height = 550; // チャートの高さ
-            const radius = Math.min(width, height) / 2 - 10;
-            const color = d3.scaleOrdinal(d3.schemeCategory10);
-
-            // 2. SVGコンテナの作成
-            const svg = d3.select("#chart").append("svg")
-                .attr("width", width)
-                .attr("height", height)
-                .append("g")
-                .attr("transform", `translate(${width / 2}, ${height / 2})`); 
-
-            // 3. 階層データ構造の作成
-            const root = d3.hierarchy(data)
-                .sum(d => d.value) 
-                .sort((a, b) => b.value - a.value);
-
-            // 4. パーティションレイアウトの作成
-            const partition = d3.partition()
-                .size([2 * Math.PI, radius]);
-
-            partition(root);
-
-            // 5. Arcジェネレータの作成
-            const arc = d3.arc()
-                .startAngle(d => d.x0)
-                .endAngle(d => d.x1)
-                .innerRadius(d => d.y0)
-                .outerRadius(d => d.y1);
-
-            // 6. ツールチップの選択
-            const tooltip = d3.select("#tooltip");
-
-            // 7. パス（扇形）の描画
-            svg.selectAll("path")
-                .data(root.descendants().filter(d => d.depth)) 
-                .enter().append("path")
-                .attr("d", arc)
-                .style("fill", d => color((d.children ? d : d.parent).data.name))
-                .style("stroke", "#fff") // 境界線は白で固定
-                .style("stroke-width", "0.5px")
-                .on("mouseover", (event, d) => {
-                    tooltip.transition().duration(200).style("opacity", .9);
-                    let percent = (d.value / root.value * 100).toFixed(1);
-                    tooltip.html(`<b>${d.data.name}</b><br>全体に占める割合: ${percent}%`) 
-                        .style("left", (event.pageX + 15) + "px")
-                        .style("top", (event.pageY - 28) + "px");
-                })
-                .on("mouseout", () => {
-                    tooltip.transition().duration(500).style("opacity", 0);
-                });
-
-            // 8. ラベルの追加
-             svg.selectAll("text")
-                .data(root.descendants().filter(d => d.depth && (d.y0 + d.y1) / 2 * (d.x1 - d.x0) > 10))
-                .enter().append("text")
-                .attr("transform", d => {
-                    const x = (d.x0 + d.x1) / 2 * 180 / Math.PI;
-                    const y = (d.y0 + d.y1) / 2;
-                    return `rotate(${x - 90}) translate(${y},0) rotate(${x < 180 ? 0 : 180})`; 
-                })
-                .attr("dy", "0.35em")
-                .attr("text-anchor", "middle")
-                // .style("fill", d => d.depth > 1 ? "#444" : "#000") // fill: inherit; に任せる
-                .text(d => {
-                     // ラベルの文字数制限を少し緩和 (20 -> 30)
-                     const name = d.data.name;
-                     return name.length > 30 ? name.substring(0, 30) + "..." : name;
-                });
-
-        </script>
-    </body>
-    </html>
-    """
-    
+# --- `squarify` (matplotlib) を使ったTreemap描画関数 ---
+def create_treemap_figure(json_data_str):
     try:
-        json_payload = json.dumps(json.loads(json_data_str))
+        data = json.loads(json_data_str)
+        if 'children' not in data or not data['children']:
+            return None, "JSONデータに有効な 'children' (クラスター) が見つかりません。"
     except json.JSONDecodeError:
-        json_payload = '{"name": "JSONエラー", "children": []}'
+        return None, "AIが生成したJSONの解析に失敗しました。"
+    except TypeError:
+         return None, "AIの応答が空または不正です。"
+
+    sizes = []
+    labels = []
+    color_list = []
+    
+    # 色を "tab10" から "Set3" (パステルカラー) に変更
+    cmap = plt.get_cmap("Set3")
+    cluster_colors = {}
+    color_index = 0
+
+    for cluster in data.get('children', []):
+        cluster_name = cluster.get('name', '不明なクラスター')
         
-    # .replace() を使って安全にJSONデータを挿入
-    return html_template.replace("__JSON_DATA_PLACEHOLDER__", json_payload)
-# --- ▲ 修正完了 ▲ ---
+        if cluster_name not in cluster_colors:
+            cluster_colors[cluster_name] = cmap(color_index % 12) # Set3は12色
+            color_index += 1
+        cluster_color = cluster_colors[cluster_name]
+        
+        sub_topics = cluster.get('children', [])
+        if not sub_topics:
+            continue 
+        else:
+            for sub_topic in sub_topics:
+                sub_value = sub_topic.get('value', 0)
+                if sub_value > 0: 
+                    sizes.append(sub_value)
+                    labels.append(sub_topic.get('name', '不明なトピック'))
+                    color_list.append(cluster_color) 
+
+    if not sizes:
+        return None, "描画対象となるサブトピック（value > 0）が見つかりませんでした。"
+
+    try:
+        fig, ax = plt.subplots(figsize=(16, 9))
+        
+        # 輪郭(edgecolor)と文字(text_kwargs)を調整
+        squarify.plot(
+            sizes=sizes, 
+            label=labels, 
+            color=color_list, 
+            ax=ax,
+            edgecolor="white", # 輪郭を白に
+            linewidth=2,       # 輪郭の太さを2に
+            text_kwargs={'color':'#222222', 'fontsize':10, 'wrap':True} # 文字を濃いグレーに、自動折り返し
+        )
+        
+        ax.set_title("トピック構成 (Treemap)", fontsize=18)
+        ax.axis('off')
+        
+        plt.close(fig) # メモリ解放
+        return fig, None
+    except Exception as e:
+        return None, f"Treemap描画中にエラーが発生: {e}"
+
+
+# --- 感情分析円グラフ描画関数 ---
+def create_sentiment_pie_chart(json_data_str):
+    try:
+        data = json.loads(json_data_str)
+        if not isinstance(data, list) or len(data) == 0:
+             return None, "AIが生成したJSONの形式が不正です (リストではありません)。"
+    except json.JSONDecodeError:
+        return None, "AIが生成したJSONの解析に失敗しました。"
+    except TypeError:
+         return None, "AIの応答が空または不正です。"
+
+    labels = []
+    sizes = []
+    colors = []
+    
+    color_map = {
+        "ポジティブ": "#4CAF50", # 緑
+        "ネガティブ": "#F44336", # 赤
+        "中立": "#9E9E9E"       # グレー
+    }
+    
+    for item in data:
+        sentiment = item.get("sentiment", "不明")
+        count = item.get("count", 0)
+        
+        if count > 0: 
+            labels.append(f"{sentiment}\n({count:,}件)")
+            sizes.append(count)
+            colors.append(color_map.get(sentiment, "#BDBDBD")) 
+
+    if not sizes:
+        return None, "描画対象となる感情データ（件数 > 0）が見つかりませんでした。"
+
+    try:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        wedges, texts, autotexts = ax.pie(
+            sizes, 
+            labels=labels, 
+            colors=colors,
+            autopct=lambda p: f"{p:.1f}%\n({int(p/100.*sum(sizes)):,d}件)",
+            startangle=90,
+            pctdistance=0.85, 
+            labeldistance=1.1, 
+            textprops={'color':'black', 'fontsize': 11} 
+        )
+        
+        plt.setp(autotexts, color='white', fontweight='bold', fontsize=10)
+        
+        ax.set_title("感情分析（ポジ・ネガ・中立）の割合", fontsize=18)
+        ax.axis('equal')  
+        
+        plt.close(fig) 
+        return fig, None
+    except Exception as e:
+        return None, f"円グラフ描画中にエラーが発生: {e}"
 
 
 # --- 7. WordCloud生成関数 ---
@@ -389,13 +401,20 @@ def generate_network(_words_df, font_path, _stopwords_set):
     for words in _words_df:
         unique_words = sorted(list(set(word for word in words if word not in _stopwords_set)))
         for w1, w2 in combinations(unique_words, 2): co_occur_counter[(w1, w2)] += 1
-    top_pairs = co_occur_counter.most_common(50)
+    
+    top_pairs = co_occur_counter.most_common(70) 
+    
     if top_pairs:
         G = nx.Graph()
         for (w1, w2), weight in top_pairs: G.add_edge(w1, w2, weight=weight)
-        fig_net, ax = plt.subplots(figsize=(14, 14)); pos = nx.spring_layout(G, k=0.8, iterations=50)
+        
+        fig_net, ax = plt.subplots(figsize=(16, 16)); 
+        pos = nx.spring_layout(G, k=0.9, iterations=50) 
+        
         nx.draw_networkx_nodes(G, pos, node_size=2000, node_color='lightblue', alpha=0.8)
-        edge_weights = [d['weight'] * 0.2 for u,v,d in G.edges(data=True)]
+        
+        edge_weights = [d['weight'] * 0.1 for u,v,d in G.edges(data=True)] 
+        
         nx.draw_networkx_edges(G, pos, width=edge_weights, alpha=0.4, edge_color='gray')
         labels_kwargs = {'font_size': 10, 'font_family': 'IPAexGothic'} if font_path else {'font_size': 10}
         nx.draw_networkx_labels(G, pos, **labels_kwargs)
@@ -424,7 +443,16 @@ def generate_html_report():
     html_parts.append("<style>body{font-family:sans-serif;margin:20px}h1,h2,h3{color:#333;border-bottom:1px solid #ccc;padding-bottom:5px}h2{margin-top:30px}.result-section{margin-bottom:30px;padding:15px;border:1px solid #eee;border-radius:5px;background-color:#f9f9f9}img{max-width:100%;height:auto;border:1px solid #ddd;margin-top:10px}table{border-collapse:collapse;width:100%;margin-top:10px}th,td{border:1px solid #ddd;padding:8px;text-align:left}th{background-color:#f2f2f2}pre{background-color:#eee;padding:10px;border-radius:3px;white-space:pre-wrap;word-wrap:break-word}</style>")
     html_parts.append("</head><body><h1>テキスト分析レポート</h1>")
     if 'ai_result_simple' in st.session_state: html_parts.append(f"<div class='result-section'><h2>🤖 AI サマリー (簡易)</h2><pre>{st.session_state.ai_result_simple}</pre></div>")
+    
+    if 'fig_sentiment_pie_display' in st.session_state and st.session_state.fig_sentiment_pie_display:
+        img_base64 = fig_to_base64_png(st.session_state.fig_sentiment_pie_display);
+        if img_base64: html_parts.append(f"<div class='result-section'><h2>💖 AI 感情分析</h2><img src='{img_base64}' alt='Sentiment Pie Chart'></div>")
+
+    if 'fig_treemap_display' in st.session_state and st.session_state.fig_treemap_display:
+        img_base64 = fig_to_base64_png(st.session_state.fig_treemap_display);
+        if img_base64: html_parts.append(f"<div class='result-section'><h2>📊 AI クラスター分析 (Treemap)</h2><img src='{img_base64}' alt='Treemap'></div>")
     if 'ai_result_cluster_text' in st.session_state: html_parts.append(f"<div class='result-section'><h2>📊 AI クラスター分析 (解釈)</h2><pre>{st.session_state.ai_result_cluster_text}</pre></div>")
+
     if 'fig_wc_display' in st.session_state and st.session_state.fig_wc_display:
         img_base64 = fig_to_base64_png(st.session_state.fig_wc_display);
         if img_base64: html_parts.append(f"<div class='result-section'><h2>☁️ WordCloud (全体)</h2><img src='{img_base64}' alt='WordCloud Overall'></div>")
@@ -493,6 +521,11 @@ if uploaded_file:
                         st.session_state.pop('ai_result_simple', None); st.session_state.pop('ai_result_academic', None)
                         st.session_state.pop('ai_result_cluster_json', None)
                         st.session_state.pop('ai_result_cluster_text', None)
+                        st.session_state.pop('fig_treemap_display', None) 
+                        st.session_state.pop('treemap_error_display', None)
+                        st.session_state.pop('ai_result_sentiment_json', None) 
+                        st.session_state.pop('fig_sentiment_pie_display', None)
+                        st.session_state.pop('sentiment_pie_error_display', None) 
                         st.session_state.pop('fig_wc_display', None); st.session_state.pop('wc_error_display', None)
                         st.session_state.pop('fig_net_display', None); st.session_state.pop('net_error_display', None)
                         st.session_state.pop('chi2_results_display', None); st.session_state.pop('chi2_error_display', None)
@@ -531,9 +564,9 @@ if uploaded_file:
             current_stopwords_set = BASE_STOPWORDS.union(dynamic_sw_set)
             st.markdown("---")
 
-            # タブ名リストとタブ変数を9個に増やす
-            tab_names = ["🤖 AI サマリー (簡易)", "📊 AI クラスター分析", "☁️ WordCloud", "📊 単語頻度ランキング", "🕸️ 共起ネットワーク", "🔍 KWIC (文脈検索)", "📈 属性別 特徴語", "📝 AI 学術論文", "💬 AI チャット"]
-            tab1, tab_cluster, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(tab_names)
+            # --- タブを10個に増やす ---
+            tab_names = ["🤖 AI サマリー", "💖 AI 感情分析", "📊 AI クラスター", "☁️ WordCloud", "📊 単語頻度", "🕸️ 共起ネットワーク", "🔍 KWIC", "📈 属性別特徴語", "📝 AI 学術論文", "💬 AI チャット"]
+            tab1, tab_sentiment, tab_cluster, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(tab_names)
             
             # --- (共通) AIに渡すテキストと件数を生成するロジック ---
             
@@ -569,68 +602,109 @@ if uploaded_file:
             # --- (共通ロジックここまで) ---
 
 
+            # --- (共通) クラスターJSONを（必要なら生成しつつ）取得するヘルパー関数 ---
+            def get_or_generate_cluster_json(ai_input_text, analysis_scope_instr, analyzed_items):
+                if 'ai_result_cluster_json' not in st.session_state:
+                    contents_json = [{"parts": [{"text": ai_input_text}]}]
+                    schema = {
+                        "type": "OBJECT",
+                        "properties": {
+                            "name": {"type": "STRING", "description": "常に '全体' または 'All Topics'"},
+                            "children": {
+                                "type": "ARRAY",
+                                "description": "主要なクラスター（3〜5個）の配列",
+                                "items": {
+                                    "type": "OBJECT",
+                                    "properties": {
+                                        "name": {"type": "STRING", "description": "クラスター名 (例: 'ポジティブな意見 (30.0%)')"},
+                                        "children": {
+                                            "type": "ARRAY",
+                                            "description": "サブトピック（3〜5個）の配列",
+                                            "items": {
+                                                "type": "OBJECT",
+                                                "properties": {
+                                                    "name": {"type": "STRING", "description": "サブトピック名 (例: 'デザインへの言及 (15.0%)')"},
+                                                    "value": {"type": "NUMBER", "description": "サブトピックの割合（数値のみ）"}
+                                                },
+                                                "required": ["name", "value"]
+                                            }
+                                        }
+                                    },
+                                    "required": ["name", "children"]
+                                }
+                            }
+                        },
+                        "required": ["name", "children"]
+                    }
+                    
+                    gen_config_json = {
+                        "response_mime_type": "application/json",
+                        "response_schema": schema
+                    }
+                    
+                    system_instr_json = SYSTEM_PROMPT_CLUSTER_JSON.format(
+                        analysis_scope_instruction=analysis_scope_instr,
+                        analyzed_items=analyzed_items
+                    )
+                    
+                    json_str = call_gemini_api(contents_json, system_instruction=system_instr_json, generation_config=gen_config_json)
+                    st.session_state.ai_result_cluster_json = json_str
+                
+                return st.session_state.ai_result_cluster_json
+
+
             # --- Tab 1: AI サマリー (簡易) ---
             with tab1:
                 if 'ai_result_simple' not in st.session_state:
-                    with st.spinner("AIによる要約を生成中..."):
+                    with st.spinner("AIによるクラスター分析と要約を生成中..."):
                         
                         if analyzed_items < total_items: st.warning(analysis_scope_warning, icon="⚠️")
                         else: st.info(analysis_scope_warning, icon="✅")
 
+                        try:
+                            cluster_json_str = get_or_generate_cluster_json(ai_input_text, analysis_scope_instr, analyzed_items)
+                        except Exception as e:
+                            st.error(f"クラスターJSONの生成に失敗しました: {e}")
+                            cluster_json_str = '{"name": "エラー", "children": []}'
+
                         contents = [{"parts": [{"text": ai_input_text}]}]
                         has_attr = bool(attribute_columns)
-                        has_attribute_str_s = "## 6. 属性別の傾向 \n(属性ごとの特徴的な意見を比較)" if has_attr else ""
+                        has_attribute_str_s = "## 6. 属性別の傾向 (もしあれば)\n(属性ごとの特徴的な意見を比較)" if has_attr else ""
                         attr_instr_s = "データは「属性 || テキスト」の形式です。属性ごとの傾向や違いにも着目して分析してください。" if has_attr else ""
                         
                         system_instr_s = SYSTEM_PROMPT_SIMPLE.format(
                             analysis_scope_instruction=analysis_scope_instr,
                             attributeInstruction=attr_instr_s, 
-                            has_attribute=has_attribute_str_s
+                            has_attribute=has_attribute_str_s,
+                            cluster_json_data=cluster_json_str 
                         )
                         st.session_state.ai_result_simple = call_gemini_api(contents, system_instruction=system_instr_s)
                 st.markdown(st.session_state.ai_result_simple)
 
-            # --- (新設) AI クラスター分析タブ (JSON + D3.js) ---
-            with tab_cluster:
-                st.subheader("AIによる言説クラスター分析 (Sunburst)")
-                st.info("AIがテキストを階層的なトピックに分類し、その構成比を可視化します。円グラフはマウスオーバーで操作できます。")
+            # --- (新設) AI 感情分析タブ (JSON + Matplotlib Pie Chart) ---
+            with tab_sentiment:
+                st.subheader("AIによる感情分析（円グラフ）")
+                st.info("AIが全テキストを「ポジティブ」「ネガティブ」「中立」に分類し、その構成比（件数と割合）を可視化します。")
+                st.warning("この分析は、AIサマリーの「ポジティブ/ネガティブな意見」の抜粋とは異なり、全件を対象としたAIによる分類集計です。", icon="ℹ️")
 
-                # 1. JSONデータの生成 (キャッシュ確認)
-                if 'ai_result_cluster_json' not in st.session_state:
-                    with st.spinner("AIによるクラスターJSONを生成中... (ステップ1/2)"):
+                # 1. 感情分析JSONの生成 (キャッシュ確認)
+                if 'ai_result_sentiment_json' not in st.session_state:
+                    with st.spinner("AIによる感情分析JSONを生成中... (ステップ1/2)"):
                         if analyzed_items < total_items: st.warning(analysis_scope_warning, icon="⚠️")
                         else: st.info(analysis_scope_warning, icon="✅")
 
                         contents_json = [{"parts": [{"text": ai_input_text}]}]
                         schema = {
-                            "type": "OBJECT",
-                            "properties": {
-                                "name": {"type": "STRING", "description": "常に '全体' または 'All Topics'"},
-                                "children": {
-                                    "type": "ARRAY",
-                                    "description": "主要なクラスター（3〜5個）の配列",
-                                    "items": {
-                                        "type": "OBJECT",
-                                        "properties": {
-                                            "name": {"type": "STRING", "description": "クラスター名 (例: 'ポジティブな意見 (30.0%)')"},
-                                            "children": {
-                                                "type": "ARRAY",
-                                                "description": "サブトピック（3〜5個）の配列",
-                                                "items": {
-                                                    "type": "OBJECT",
-                                                    "properties": {
-                                                        "name": {"type": "STRING", "description": "サブトピック名 (例: 'デザインへの言及 (15.0%)')"},
-                                                        "value": {"type": "NUMBER", "description": "サブトピックの割合（数値のみ）"}
-                                                    },
-                                                    "required": ["name", "value"]
-                                                }
-                                            }
-                                        },
-                                        "required": ["name", "children"]
-                                    }
-                                }
-                            },
-                            "required": ["name", "children"]
+                            "type": "ARRAY",
+                            "items": {
+                                "type": "OBJECT",
+                                "properties": {
+                                    "sentiment": {"type": "STRING", "description": "感情ラベル (ポジティブ, ネガティブ, 中立)"},
+                                    "count": {"type": "NUMBER", "description": "該当する件数"},
+                                    "percentage": {"type": "NUMBER", "description": "全体に占める割合 (xx.x)"}
+                                },
+                                "required": ["sentiment", "count", "percentage"]
+                            }
                         }
                         
                         gen_config_json = {
@@ -638,17 +712,61 @@ if uploaded_file:
                             "response_schema": schema
                         }
                         
-                        system_instr_json = SYSTEM_PROMPT_CLUSTER_JSON.format(
+                        system_instr_json = SYSTEM_PROMPT_SENTIMENT_JSON.format(
                             analysis_scope_instruction=analysis_scope_instr,
                             analyzed_items=analyzed_items
                         )
                         
                         json_str = call_gemini_api(contents_json, system_instruction=system_instr_json, generation_config=gen_config_json)
-                        st.session_state.ai_result_cluster_json = json_str
+                        st.session_state.ai_result_sentiment_json = json_str
+                
+                # 2. 円グラフの描画 (キャッシュ確認)
+                if 'fig_sentiment_pie_display' not in st.session_state and 'ai_result_sentiment_json' in st.session_state:
+                    with st.spinner("感情分析円グラフを生成中... (ステップ2/2)"):
+                        json_data_str = st.session_state.ai_result_sentiment_json
+                        fig_pie, pie_error = create_sentiment_pie_chart(json_data_str)
+                        st.session_state.fig_sentiment_pie_display = fig_pie
+                        st.session_state.sentiment_pie_error_display = pie_error
+                
+                # 3. 描画
+                if 'fig_sentiment_pie_display' in st.session_state and st.session_state.fig_sentiment_pie_display:
+                    fig_pie = st.session_state.fig_sentiment_pie_display
+                    st.pyplot(fig_pie)
+                    
+                    img_bytes = fig_to_bytes(fig_pie)
+                    if img_bytes: st.download_button("この画像をダウンロード (PNG)", img_bytes, "sentiment_pie_chart.png", "image/png")
+
+                elif 'sentiment_pie_error_display' in st.session_state:
+                    st.error(st.session_state.sentiment_pie_error_display)
+                    if 'ai_result_sentiment_json' in st.session_state:
+                         st.text_area("AIのJSONレスポンス (エラー)", st.session_state.ai_result_sentiment_json, height=200)
+                else:
+                    st.info("感情分析データを生成中です...")
+
+
+            # --- AI クラスター分析タブ (JSON + Matplotlib/squarify) ---
+            with tab_cluster:
+                st.subheader("AIによる言説クラスター分析 (Treemap)")
+                st.info("AIがテキストを階層的なトピックに分類し、その構成比（面積）を可視化します。色の凡例と解釈は、グラフの下に表示されます。")
+
+                # 1. JSONデータの生成 (キャッシュ確認)
+                if 'ai_result_cluster_json' not in st.session_state:
+                    with st.spinner("AIによるクラスターJSONを生成中... (ステップ1/3)"):
+                        if analyzed_items < total_items: st.warning(analysis_scope_warning, icon="⚠️")
+                        else: st.info(analysis_scope_warning, icon="✅")
+                        
+                        try:
+                            # 共通関数を呼び出す
+                            get_or_generate_cluster_json(ai_input_text, analysis_scope_instr, analyzed_items)
+                        except Exception as e:
+                            st.error(f"クラスターJSONの生成に失敗しました: {e}")
+                            if 'ai_result_cluster_json' in st.session_state: 
+                                 st.text_area("AIの生レスポンス (エラー)", st.session_state.ai_result_cluster_json, height=100)
+
 
                 # 2. テキスト解釈の生成 (キャッシュ確認)
                 if 'ai_result_cluster_text' not in st.session_state and 'ai_result_cluster_json' in st.session_state:
-                     with st.spinner("AIによるクラスターの解釈を生成中... (ステップ2/2)"):
+                     with st.spinner("AIによるクラスターの解釈を生成中... (ステップ2/3)"):
                         json_str = st.session_state.ai_result_cluster_json
                         
                         system_instr_text = SYSTEM_PROMPT_CLUSTER_TEXT.format(
@@ -659,33 +777,34 @@ if uploaded_file:
                         
                         text_summary = call_gemini_api(contents_text, system_instruction=system_instr_text)
                         st.session_state.ai_result_cluster_text = text_summary
+                
+                # 3. Treemap (Matplotlib/Squarify) の描画 (キャッシュ確認)
+                if 'fig_treemap_display' not in st.session_state and 'ai_result_cluster_json' in st.session_state:
+                    with st.spinner("Treemapを生成中... (ステップ3/3)"):
+                        json_data_str = st.session_state.ai_result_cluster_json
+                        fig_treemap, treemap_error = create_treemap_figure(json_data_str)
+                        st.session_state.fig_treemap_display = fig_treemap
+                        st.session_state.treemap_error_display = treemap_error
 
-                # 3. D3.jsによる描画とテキスト表示
-                if 'ai_result_cluster_json' in st.session_state:
-                    json_data_str = st.session_state.ai_result_cluster_json
-                    try:
-                        # JSONが有効かどうかの簡易チェック (AIが空や不正な文字列を返さないか)
-                        if not json_data_str or json_data_str.strip() == "":
-                            st.error("AIがクラスター分析用のJSONデータを生成できませんでした。")
-                        else:
-                            json.loads(json_data_str) # ここでパースに失敗すると except json.JSONDecodeError へ
-                            
-                            st.subheader("トピック構成 (Sunburst)")
-                            sunburst_html_content = create_sunburst_html(json_data_str)
-                            html(sunburst_html_content, height=600, scrolling=False)
-                            
-                            if 'ai_result_cluster_text' in st.session_state:
-                                st.subheader("AIによるクラスターの解釈")
-                                st.markdown(st.session_state.ai_result_cluster_text)
-                            else:
-                                st.info("クラスターの解釈を生成中です...")
-                            
-                    except json.JSONDecodeError:
-                        st.error("AIによるJSON生成に失敗しました。AIが有効なJSONを返せませんでした。")
-                        st.text_area("AIの生レスポンス (エラー)", json_data_str, height=200)
-                    except Exception as e:
-                        st.error(f"Sunburstチャートの描画エラー: {e}")
-                        st.text_area("AIのJSONレスポンス", json_data_str, height=200)
+                # 4. 描画とテキスト表示
+                if 'fig_treemap_display' in st.session_state and st.session_state.fig_treemap_display:
+                    st.subheader("トピック構成 (Treemap)")
+                    fig_treemap = st.session_state.fig_treemap_display
+                    st.pyplot(fig_treemap)
+                    
+                    img_bytes = fig_to_bytes(fig_treemap)
+                    if img_bytes: st.download_button("この画像をダウンロード (PNG)", img_bytes, "treemap.png", "image/png")
+
+                    if 'ai_result_cluster_text' in st.session_state:
+                        # 凡例と解釈はAIの応答に任せる
+                        st.markdown(st.session_state.ai_result_cluster_text)
+                    else:
+                        st.info("クラスターの解釈を生成中です...")
+                
+                elif 'treemap_error_display' in st.session_state:
+                    st.error(st.session_state.treemap_error_display)
+                    if 'ai_result_cluster_json' in st.session_state:
+                         st.text_area("AIのJSONレスポンス", st.session_state.ai_result_cluster_json, height=200)
                 else:
                     st.info("クラスター分析データを生成中です...")
             
@@ -808,11 +927,11 @@ if uploaded_file:
                         1.  **単語抽出**: WordCloudと同様に、名詞・動詞・形容詞からストップワードと数字を除外した単語リストを使用しました。
                         2.  **共起の定義**: 1つのドキュメント（Excelの1行）内で同時に出現した単語ペアを「共起」として定義しました。
                         3.  **頻度集計**: 全ドキュメントを対象に、共起する単語ペアの出現頻度を集計しました。
-                        4.  **ネットワーク構築**: 共起頻度が高かった上位50ペアを抽出し、`NetworkX` ライブラリを用いてネットワークを構築しました。
-                        5.  **可視化**: 単語をノード（点）、単語間の共起関係をエッジ（線）として描画しました。エッジの太さは共起頻度の高さ（関係の強さ）を反映しています（係数: 0.2）。レイアウトは `spring_layout` を使用しました。
+                        4.  **ネットワーク構築**: 共起頻度が高かった上位70ペアを抽出し、`NetworkX` ライブラリを用いてネットワークを構築しました。(ノード数を70に増やしました)
+                        5.  **可視化**: 単語をノード（点）、単語間の共起関係をエッジ（線）として描画しました。エッジの太さは共起頻度の高さ（関係の強さ）を反映しています（係数: 0.1）。(エッジを細くしました)
                         
                         #### 2. 論文記述例
-                        > ...次に、単語間の関連性を探索するため、共起ネットワーク分析を実施した。分析対象の単語（名詞、動詞、形容詞）が1ドキュメント（行）内で同時に出現した場合を「共起」と定義し、その頻度を集計した。共起頻度上位50ペアに基づきネットワーク（図2）を描画した。
+                        > ...次に、単語間の関連性を探索するため、共起ネットワーク分析を実施した。分析対象の単語（名詞、動詞、形容詞）が1ドキュメント（行）内で同時に出現した場合を「共起」と定義し、その頻度を集計した。共起頻度上位70ペアに基づきネットワーク（図2）を描画した。
                         >
                         > 図2より、[単語A]と[単語B]が強い共起関係（太いエッジ）にあることが確認された。また、[単語C]を中心として[単語D, E, F]がクラスターを形成しており、...といった文脈で語られていることが示唆された。
                     """)
@@ -888,11 +1007,17 @@ if uploaded_file:
             with tab7:
                 st.subheader("AIによる学術論文風サマリー")
                 if 'ai_result_academic' not in st.session_state:
-                    with st.spinner("AIによる学術論文風の要約を生成中..."):
+                    with st.spinner("AIによるクラスター分析と学術論文風サマリーを生成中..."):
 
                         if analyzed_items < total_items: st.warning(analysis_scope_warning, icon="⚠️")
                         else: st.info(analysis_scope_warning, icon="✅")
                         
+                        try:
+                            cluster_json_str = get_or_generate_cluster_json(ai_input_text, analysis_scope_instr, analyzed_items)
+                        except Exception as e:
+                            st.error(f"クラスターJSONの生成に失敗しました: {e}")
+                            cluster_json_str = '{"name": "エラー", "children": []}'
+
                         contents_acad = [{"parts": [{"text": ai_input_text}]}]
                         has_attr_a = bool(attribute_columns)
                         has_attribute_str_a = "## 4. 属性間の比較分析 (Comparative Analysis)\n(属性（カテゴリ）間で見られた顕著な差異や特徴的な傾向について、具体的に比較・記述する)" if has_attr_a else ""
@@ -901,7 +1026,8 @@ if uploaded_file:
                         system_instr_a = SYSTEM_PROMPT_ACADEMIC.format(
                             analysis_scope_instruction=analysis_scope_instr,
                             attributeInstruction=attr_instr_a, 
-                            has_attribute=has_attribute_str_a
+                            has_attribute=has_attribute_str_a,
+                            cluster_json_data=cluster_json_str 
                         )
                         st.session_state.ai_result_academic = call_gemini_api(contents_acad, system_instruction=system_instr_a)
                 st.markdown(st.session_state.ai_result_academic)
