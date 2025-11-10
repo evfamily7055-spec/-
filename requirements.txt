@@ -13,3 +13,5 @@ scipy
 prince
 numpy
 squarify
+plotly
+kaleido
