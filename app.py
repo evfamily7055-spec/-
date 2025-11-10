@@ -298,7 +298,6 @@ def parse_json_for_plotly(json_data_str):
         return None, None, None, "JSONに 'children' (クラスター) が見つかりません。"
 
     for cluster in clusters:
-        # AIは割合を含まない名前 (例: "クラスターA") を返す
         cluster_name = cluster.get('name', '不明なクラスター') 
         labels.append(cluster_name)
         parents.append(root_name)
@@ -310,7 +309,6 @@ def parse_json_for_plotly(json_data_str):
         else:
             cluster_total_value = 0
             for sub_topic in sub_topics:
-                # AIは割合を含まない名前 (例: "サブトピックA1") を返す
                 sub_name = sub_topic.get('name', '不明なトピック')
                 sub_value = sub_topic.get('value', 0)
                 
@@ -320,7 +318,6 @@ def parse_json_for_plotly(json_data_str):
                     values.append(sub_value)
                     cluster_total_value += sub_value
             
-            # 親クラスター (深さ1) の value を設定 (0 = 自動集計)
             values.append(0) 
 
     return labels, parents, values, None
@@ -343,14 +340,13 @@ def create_plotly_treemap(json_data_str):
         values = values,
         
         # ▼ 修正点: ラベル(太字)と割合(改行)を指定
-        # %{percentRoot} は全体 (root) に対する割合
         texttemplate="<b>%{label}</b><br>%{percentRoot:.1%}",
         
         hoverinfo="label+value+percent root", # ホバー時の情報
         
-        # ▼ 修正点: テキストフォントの指定
-        # insidetextfont で中の文字色を黒に固定
-        insidetextfont={'size': 14, 'color': '#333'}, 
+        # ▼ 修正点: テキストフォントの指定 + 左上配置
+        textposition='top left', 
+        insidetextfont={'size': 14, 'color': '#333'}, # 文字色を暗く
         
         pathbar_textfont={'size': 16}
     ))
@@ -362,10 +358,7 @@ def create_plotly_treemap(json_data_str):
         # ▼ 修正点: カラーウェイを "Pastel" (ご要望の柔らかい色) に指定
         colorway=px.colors.qualitative.Pastel,
         
-        # ▼ 修正点: uniformtext を fig.update_layout の *中* に移動
-        # 領域に収まるようにフォントサイズを自動調整
-        # 最小サイズを10ptに設定し、それより小さくなる場合はテキストを非表示にする
-        uniformtext=dict(minsize=10, mode='hide') 
+        # ▼ 修正点: uniformtext を削除 (textposition='top left' で対応)
     )
     
     return fig, None
@@ -488,7 +481,8 @@ def generate_network(_words_df, font_path, _stopwords_set):
     except Exception:
         node_colors = 'lightblue' 
 
-    edge_weights = [d['weight'] * 0.3 for u,v,d in G.edges(data=True)] 
+    # --- ▼ 修正点: エッジの係数を 0.3 -> 0.1 に変更 ---
+    edge_weights = [d['weight'] * 0.1 for u,v,d in G.edges(data=True)] 
 
     try:
         fig_net, ax = plt.subplots(figsize=(18, 18)); 
