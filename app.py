@@ -346,7 +346,8 @@ def create_plotly_treemap(json_data_str):
         
         # ▼ 修正点: テキストフォントの指定 + 左上配置
         textposition='top left', 
-        insidetextfont={'size': 14, 'color': '#333'}, # 文字色を暗く
+        # (文字色はパステルカラーに合わせて暗く)
+        insidetextfont={'size': 12, 'color': '#333'}, 
         
         pathbar_textfont={'size': 16}
     ))
@@ -358,7 +359,7 @@ def create_plotly_treemap(json_data_str):
         # ▼ 修正点: カラーウェイを "Pastel" (ご要望の柔らかい色) に指定
         colorway=px.colors.qualitative.Pastel,
         
-        # ▼ 修正点: uniformtext を削除 (textposition='top left' で対応)
+        # ▼ 修正点: uniformtext を削除し、textposition='top left' で対応
     )
     
     return fig, None
@@ -1034,7 +1035,7 @@ if uploaded_file:
                         4.  **ネットワーク構築**: 共起頻度が高かった上位70ペアを抽出し、`NetworkX` ライブラリを用いてネットワークを構築しました。
                         5.  **ノードのサイズ**: 各単語の**全体での出現頻度**に基づき、ノード（円）のサイズを動的に変更しました。
                         6.  **ノードの色**: `greedy_modularity_communities` アルゴリズムを用い、関連性の高い単語グループ（コミュニティ）を検出し、グループごとに色分けしました。
-                        7.  **エッジの太さ**: 共起頻度（関係の強さ）に基づき、エッジ（線）の太さを動的に変更しました（係数: 0.3）。
+                        7.  **エッジの太さ**: 共起頻度（関係の強さ）に基づき、エッジ（線）の太さを動的に変更しました（係数: 0.1）。
                         
                         #### 2. 論文記述例
                         > ...次に、単語間の関連性を探索するため、共起ネットワーク分析を実施した。分析対象の単語（名詞、動詞、形容詞）が1ドキュメント（行）内で同時に出現した場合を「共起」と定義し、その頻度を集計した。共起頻度上位70ペアに基づきネットワーク（図2）を描画した。ノードのサイズは各単語の出現頻度を、エッジの太さは共起頻度を反映している。また、`greedy_modularity_communities` アルゴリズムによるコミュニティ検出を実行し、抽出されたクラスターごとに色分けを行った。
