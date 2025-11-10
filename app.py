@@ -348,10 +348,9 @@ def create_plotly_treemap(json_data_str):
         
         hoverinfo="label+value+percent root", # ホバー時の情報
         
-        # ▼ 修正点: テキストの自動調整と重なり防止
-        # 領域に収まるようにフォントサイズを自動調整
-        # 最小サイズを10ptに設定し、それより小さくなる場合はテキストを非表示にする
-        uniformtext=dict(minsize=10, mode='hide'), 
+        # ▼ 修正点: テキストフォントの指定
+        # insidetextfont で中の文字色を黒に固定
+        insidetextfont={'size': 14, 'color': '#333'}, 
         
         pathbar_textfont={'size': 16}
     ))
@@ -361,7 +360,12 @@ def create_plotly_treemap(json_data_str):
         title_text="トピック構成 (Treemap)",
         title_font_size=20,
         # ▼ 修正点: カラーウェイを "Pastel" (ご要望の柔らかい色) に指定
-        colorway=px.colors.qualitative.Pastel 
+        colorway=px.colors.qualitative.Pastel,
+        
+        # ▼ 修正点: uniformtext を fig.update_layout の *中* に移動
+        # 領域に収まるようにフォントサイズを自動調整
+        # 最小サイズを10ptに設定し、それより小さくなる場合はテキストを非表示にする
+        uniformtext=dict(minsize=10, mode='hide') 
     )
     
     return fig, None
@@ -1039,7 +1043,7 @@ if uploaded_file:
                         7.  **エッジの太さ**: 共起頻度（関係の強さ）に基づき、エッジ（線）の太さを動的に変更しました（係数: 0.3）。
                         
                         #### 2. 論文記述例
-                        > ...次に、単語間の関連性を探索するため、共起ネットワーク分析を実施した。共起頻度上位70ペアに基づきネットワーク（図2）を描画した。ノードのサイズは各単語の出現頻度を、エッジの太さは共起頻度を反映している。また、`greedy_modularity_communities` アルゴリズムによるコミュニティ検出を実行し、抽出されたクラスターごとに色分けを行った。
+                        > ...次に、単語間の関連性を探索するため、共起ネットワーク分析を実施した。分析対象の単語（名詞、動詞、形容詞）が1ドキュメント（行）内で同時に出現した場合を「共起」と定義し、その頻度を集計した。共起頻度上位70ペアに基づきネットワーク（図2）を描画した。ノードのサイズは各単語の出現頻度を、エッジの太さは共起頻度を反映している。また、`greedy_modularity_communities` アルゴリズムによるコミュニティ検出を実行し、抽出されたクラスターごとに色分けを行った。
                         >
                         > 図2より、[単語A]や[単語B]が（大きなノードで示されるように）高頻度で出現していることがわかる。また、[単語C, D, E]が同じ色（[色]）のコミュニティを形成しており、これらが密接に関連するトピック群であることが示唆された。
                     """)
